@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, current-HEAD syzkaller shim rerun, active selftest wording cleanup, clean KVM v2 state-trace diagnostics, pool exec mconsole readiness timeout alignment, and refreshed vector2 current-head validation.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, current-HEAD syzkaller shim rerun, active selftest wording cleanup, clean KVM v2 state-trace diagnostics, pool exec mconsole readiness timeout alignment, refreshed vector2 current-head validation, and natural seccomp/vector2 Tier 3 soak closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -312,8 +312,23 @@ registration, trusted TAP/fd datapaths, launcher selection, fd multiqueue,
 queue-to-CPU policy, KUnit coverage, KCSAN workload evidence, sandbox checks
 evidence, and substantial seccomp Tier 3 workload evidence.
 
-The strongest long-run vector2 evidence is the stopped-clean seccomp Tier 3
-run:
+The strongest long-run vector2 evidence is now the natural current-branch
+seccomp Tier 3 run:
+
+- 7221 seconds against the planned 7200-second window;
+- 740/740 passes, with no failures or timeouts;
+- Django vector2/seccomp: 370/370 passes;
+- FastAPI vector2/seccomp: 370/370 passes;
+- all scoreboard rows recorded vector2, `vec2.0`, seccomp, TAP transport,
+  in-process host mode, and a single queue;
+- all 740 per-run logs reached `SERVER_READY`,
+  `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`;
+- the run-log scan returned no fatal, panic, warning, KCSAN/data-race, or
+  Tier 3 failure signatures; and
+- teardown left no matching soak process or stray soak/vector2 TAP device.
+
+The previous stopped-clean seccomp Tier 3 run remains historical supporting
+evidence:
 
 - 6142 seconds of a planned 7200-second window;
 - 970/970 passes, with no failures or timeouts;
@@ -558,7 +573,6 @@ older post-May-19 default-flip summaries are historical branch snapshots.
 
 Open vector2 publication work:
 
-- finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
 - extend performance coverage beyond the fixed guest-to-host TCP gate: confirm

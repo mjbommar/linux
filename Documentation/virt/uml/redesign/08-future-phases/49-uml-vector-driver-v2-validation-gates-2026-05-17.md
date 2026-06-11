@@ -29,7 +29,7 @@ implemented runtime netdev transports.
 | Trusted in-process TAP | PASS on 2026-06-11 through `vector2-inproc-tap-smoke` on rebuilt `98166580dc4f`. | Keep explicit; do not treat it as sandboxed mode. |
 | Sandbox audit | PASS on 2026-06-11 through `vector2-sandbox-audit` on rebuilt `98166580dc4f`. | Keep CI/preflight coverage aligned with launcher-managed configs. |
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
-| Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
+| Seccomp Tier 3 soak | PASS on current `next`: `06-sequencing/2026-06-11-vector2-seccomp-natural-soak.md` records a natural 7221-second run against the 7200-second budget with 740/740 PASS, split 370/370 Django-v2 and 370/370 FastAPI-v2. All rows recorded vector2 `vec2.0`, seccomp, TAP, in-process host mode, and one queue; all run logs had the expected success markers and no hidden failure signatures. | Keep as regression evidence; rerun only after later vector2, launcher, or Tier 3 changes. |
 | KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
 | Perf/fairness/KCSAN breadth | Current guest-to-host TCP gate passes after the TX/RX NAPI scheduling fix and remains green after the lazy-RX cleanup and RX checksum feature-alignment slice. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run initially failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. Scatter-gather TX improved the follow-up ratio to 0.573, and a bounded `sendmmsg()` prototype did not improve the ratio. The subsequent TX/RX NAPI scheduling fix passed the normal gate: vector2 median 37.12 Gbps vs legacy 40.08 Gbps, ratio 0.926. Lazy RX preserved that gate with vector2 median 38.96 Gbps versus legacy 39.22 Gbps, ratio 0.993. The RX checksum slice keeps the gate green with vector2 median 39.44 Gbps versus legacy 39.85 Gbps, ratio 0.990, and makes vector2 report `rx-checksumming: on [fixed]` when `csum=1` and `vnet_hdr_enabled: 1`. A current fixed-byte bidirectional TCP refresh now clears guest-to-host at 1/8/32 MiB and host-to-guest at 8/32 MiB, but host-to-guest 1 MiB remains below the no-regression bar after focused reruns. The current 1 MiB metric run reports host-side median vector2/legacy ratio 0.9147 and best ratio 0.6656, with about 12x higher vector2 scheduler pcount and voluntary context-switch deltas. Lazy RX reduces representative 1 MiB host-to-guest RX-slot preparation from 32448 prepared / 906 received / 31542 released slots to about 1410 prepared / 905 received / 505 released slots. The fixed-byte harness now captures guest `ip`/route/ethtool diagnostics, reports inherited-fd vnet-header state through ethtool, supports UDP, appends endpoint CPU timing columns, records host-to-guest UML process metric deltas, and has UDP receive/send buffer knobs. Current-head repeat-2 UDP evidence passes for buffered unpaced 1 MiB in both directions with vector2/vector host-side ratios of 0.998392 guest-to-host and 1.125627 host-to-guest, and paced 8 MiB in both directions with ratios of 0.992588 guest-to-host and 1.003083 host-to-guest. Earlier unpaced 8 MiB host-to-guest evidence still loses bytes before exact-byte completion for both drivers, so larger unpaced host-to-guest UDP remains bounded. A first privileged `perf stat` smoke now records per-driver subtree-wide syscall and CPU counters for 64 KiB host-to-guest TCP, and the helper now emits bounded host-to-guest UML-PID rows plus aggregate/comparison TSVs for repeated perf-window runs, proving the collection artifact shape is available but not yet steady-state. | Finish the rest of P4.3: host-to-guest small-transfer follow-up using the new diagnostics, steady-state syscall-rate, full CPU-utilisation, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
@@ -39,21 +39,24 @@ acceptance bars.
 ## 2026-06-11 Current-HEAD Refresh
 
 `06-sequencing/2026-06-11-vector2-current-head-validation.md` records a
-current-head vector2 refresh on rebuilt `98166580dc4f`
-(`7.1.0-rc7-00188-g98166580dc4f`):
+current-head vector2 refresh on the current branch:
 
-  - `um_vector2_*` KUnit: 84 pass, 0 fail, 2 trusted-TAP skips;
+  - `um_vector2_*` KUnit: 96 pass, 0 fail, 2 trusted-TAP skips;
   - `vector2-fd-handoff-smoke`: PASS;
   - `vector2-fd-multiqueue-smoke`: PASS;
   - `vector2-inproc-tap-smoke`: PASS;
   - `vector2-sandbox-audit`: PASS, `PASS=1/1 FAIL=0 TIMEOUT=0`;
-  - `vector2-pool-tap-smoke`: PASS; and
+  - `vector2-failed-open`: PASS;
+  - `vector2-pool-tap-smoke`: PASS;
+  - guest-to-host TCP `net-bench`: PASS, vector2/vector ratio 0.958; and
   - bounded KVM-v2/vector2 Tier 3 smoke: Django-v2 1/1 PASS and
     FastAPI-v2 1/1 PASS, both with `SERVER_READY`,
     `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`.
 
 This refresh improves confidence in the current stack but does not close the
-replacement gates: P4.3 perf parity, P4.4 natural 7200-second seccomp soak,
+replacement gates by itself. The separate P4.4 natural 7200-second
+seccomp/vector2 soak is now closed by
+`06-sequencing/2026-06-11-vector2-seccomp-natural-soak.md`; P4.3 perf/fairness
 and full P4.5 KVM-v2/fairness breadth remain open.
 
 ## P4.3 — performance parity acceptance gate
@@ -199,11 +202,15 @@ bars.
 
 ### Current state
 
-`45-uml-vector-driver-v2-seccomp-soak-status.md` recorded:
-  - 6142-second run (85.3 % of 7200-second budget);
-  - 970 / 970 PASS across Django-v2 + FastAPI-v2 on seccomp +
+`06-sequencing/2026-06-11-vector2-seccomp-natural-soak.md` records the
+current natural-budget closure:
+  - 7221-second run against the 7200-second budget;
+  - 740 / 740 PASS across Django-v2 + FastAPI-v2 on seccomp +
     vector2 fd+tap;
-  - operator-stopped (not budget-elapsed).
+  - budget-elapsed daemon stop with clean post-run process and TAP cleanup.
+
+`45-uml-vector-driver-v2-seccomp-soak-status.md` keeps the earlier May 17
+6142-second operator-stopped run as historical supporting evidence.
 
 ### Acceptance
 

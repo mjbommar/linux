@@ -1,11 +1,37 @@
 # UML Vector Driver V2 Seccomp Soak Status
 
-**Status:** stopped-clean long-soak evidence; not replacement approval.
-**Date:** 2026-05-17.
+**Status:** natural 7200-second seccomp/vector2 gate passed on current `next`;
+not replacement approval.
+**Date:** 2026-05-17; current update 2026-06-11.
 
-**Current status note:** this file records the May 17 seccomp soak evidence.
-The current vector2 publication gate tracker is
+**Current status note:** the May 17 run below is historical stopped-clean
+evidence. The current accepted natural run is recorded in
+`06-sequencing/2026-06-11-vector2-seccomp-natural-soak.md`, and the current
+vector2 publication gate tracker is
 `49-uml-vector-driver-v2-validation-gates-2026-05-17.md`.
+
+## Current Natural-Gate Result
+
+The 2026-06-11 current-`next` run reached the natural daemon budget stop:
+
+```text
+commit=899e80995800
+kernel=7.1.0-rc7-00261-gbb092119158b
+elapsed=7221s
+budget=7200s
+stop_reason=budget elapsed
+scoreboard_rows=740
+bad_rows=0
+tier3-django-v2/seccomp=370/370 PASS
+tier3-fastapi-v2/seccomp=370/370 PASS
+```
+
+All 740 rows recorded vector2 `vec2.0`, seccomp backend, TAP transport,
+in-process host mode, and a single queue. All 740 per-run logs contained
+`SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and
+`REPRO_DONE rc=0`. A run-log scan for fatal, panic, warning, KCSAN/data-race,
+and Tier 3 failure signatures returned no matches. Cleanup checks found no
+matching soak process and no matching soak/vector2 TAP device.
 
 This note records the end-of-day vector2 seccomp Tier 3 soak status.
 The run was intentionally stopped by the operator before the 7200-second
@@ -125,7 +151,8 @@ no matching run-soak-daemon, umlctl gate loop, or UML tier3 process
 
 ## Interpretation
 
-This is the strongest vector2 seccomp Tier 3 soak evidence so far:
+At the May 17 cutoff, this was the strongest vector2 seccomp Tier 3 soak
+evidence so far:
 
 - it extends the earlier 1266-second pilot to 6142 seconds;
 - it increases the completed run count from 200 to 970;
@@ -135,11 +162,9 @@ This is the strongest vector2 seccomp Tier 3 soak evidence so far:
 - it shows no fatal, warning, KCSAN, data-race, or cleanup signal in
   the captured evidence.
 
-It does not close the full long-soak gate because the run was stopped
-at 85.3% of the planned 7200-second window.  The next acceptance run
-should let the 7200-second seccomp/vector2 soak finish naturally, then
-record the same scoreboard, marker, hidden-signature, and cleanup
-checks.
+It did not close the full long-soak gate because the run was stopped at 85.3%
+of the planned 7200-second window. The 2026-06-11 current-`next` run above now
+closes that natural seccomp/vector2 long-soak gate.
 
 ## Open Items At The May 17 Cutoff
 
@@ -149,7 +174,6 @@ Vector2 is still not replacement-ready.  The remaining blockers are:
   reproduced even without vector2;
 - KVM-v2 + vector2 Tier 3 acceptance after that backend blocker is
   fixed or bounded;
-- a naturally completed 7200-second seccomp/vector2 soak;
 - longer SMP fairness and queue profile coverage;
 - broader KCSAN profiles and KVM-v2 reruns after baseline readiness;
 - performance acceptance, including guest-to-host regression analysis;
