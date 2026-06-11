@@ -77,6 +77,25 @@ bool kvm_v2_record_syscall_supported(unsigned long syscall_nr)
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_syscall_supported);
 
+int kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
+				       unsigned long syscall_nr)
+{
+	bool strict;
+
+	if (!rec || kvm_v2_record_syscall_supported(syscall_nr))
+		return 0;
+
+	mutex_lock(&rec->lock);
+	strict = rec->strict_replay;
+	mutex_unlock(&rec->lock);
+	if (!strict)
+		return 0;
+
+	kvm_v2_record_note_replay_failure(rec, syscall_nr, -EOPNOTSUPP);
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_check_strict_syscall);
+
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on)
 {
 	u8 *flag;

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, and strict replay fail-closed syscall policy.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, and strict replay gate coverage.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -138,16 +138,16 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 16/16 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 17/17 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
   divergence cursor preservation, `uname(2)` payload restore, too-small
   payload buffer rejection, payload argument mismatch, payload overflow
-  accounting, strict replay syscall-policy coverage, strict replay failure
-  accounting, time-travel clock-event FIFO replay, the synthetic gadget-bypass
-  page helper, and snapshot metadata cleanup. The live KVM syscall dispatcher
-  now calls the observe/consume hooks, so this is no longer core-only syscall
-  plumbing.
+  accounting, strict replay syscall-policy coverage, strict-on/strict-off
+  gate behavior, strict replay failure accounting, time-travel clock-event
+  FIFO replay, the synthetic gadget-bypass page helper, and snapshot metadata
+  cleanup. The live KVM syscall dispatcher now calls the observe/consume hooks,
+  so this is no longer core-only syscall plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
   record start, and records 3067 live KVM v2 syscall entries with 269896

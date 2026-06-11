@@ -74,7 +74,8 @@ config UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
 	  Build the KVM v2 record/replay container and its syscall-log
 	  encoder/decoder. The core provides a single active record session,
 	  a bounded in-memory event stream, strict replay checking, and KUnit
-	  coverage for the state machine and FIFO replay rules.
+	  coverage for the state machine, FIFO replay rules, payload restore,
+	  and strict syscall policy.
 
 	  The live KVM syscall dispatcher can observe and consume this log, and
 	  the debugfs validation surface can capture a KVM v2 task snapshot at

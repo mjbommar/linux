@@ -1445,19 +1445,6 @@ static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
 }
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
-static bool kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
-					       unsigned long syscall_nr)
-{
-	if (!rec->strict_replay || kvm_v2_record_syscall_supported(syscall_nr))
-		return true;
-
-	kvm_v2_record_note_replay_failure(rec, syscall_nr, -EOPNOTSUPP);
-	pr_info_ratelimited("kvm-v2 record: strict replay unsupported nr=%lu\n",
-			    syscall_nr);
-	force_sig(SIGSEGV);
-	return false;
-}
-
 static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 					struct uml_pt_regs *regs,
 					unsigned long syscall_nr,
@@ -1498,8 +1485,13 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	rec = kvm_v2_record_active();
 	if (!rec || rec->state != KVM_V2_RECORD_REPLAYING)
 		return false;
-	if (!kvm_v2_record_check_strict_syscall(rec, syscall_nr))
+	rc = kvm_v2_record_check_strict_syscall(rec, syscall_nr);
+	if (rc < 0) {
+		pr_info_ratelimited("kvm-v2 record: strict replay unsupported nr=%lu\n",
+				    syscall_nr);
+		force_sig(SIGSEGV);
 		return true;
+	}
 
 	rc = kvm_v2_record_replay_payload(rec, regs, syscall_nr, &served_ret);
 	if (!rc)
