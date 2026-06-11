@@ -1,6 +1,6 @@
 # UML vector driver v2 initial performance baseline
 
-**Status:** partial performance evidence - bidirectional TCP smoke.
+**Status:** partial performance evidence - TCP and initial paced UDP smoke.
 **Date:** 2026-05-17.
 
 This note records the first repeatable legacy-vs-vector2 performance
@@ -22,13 +22,14 @@ The helper:
 
 - generates a temporary Umlfile per driver;
 - supports `guest-to-host`, `host-to-guest`, or `both`;
-- starts a host Python TCP sink for guest-to-host runs;
-- starts a guest Python TCP sink for host-to-guest runs;
+- supports `tcp` or `udp`, with TCP as the default;
+- starts a host Python sink for guest-to-host runs;
+- starts a guest Python sink for host-to-guest runs;
 - boots the UML guest through `umlctl up`;
 - sends one or more fixed byte counts across the selected direction;
 - records guest-side and host-side MiB/s;
-- writes a TSV summary, including transfer size and repeat index, plus
-  per-run logs;
+- writes a TSV summary, including transfer size, repeat index, and protocol,
+  plus per-run logs;
 - tears the instance down with `umlctl down --force --rm`.
 
 Defaults:
@@ -37,6 +38,7 @@ Defaults:
 drivers: vector,vector2
 direction: guest-to-host
 bytes:   33554432
+protocol: tcp
 repeat:  1
 port:    19091
 backend: seccomp
@@ -514,9 +516,89 @@ Interpretation:
   fixed-byte harness; single-queue vector2 and lazy RX both improve the cell
   but do not close it;
   and
-- this refresh improves the TCP story, but it does not close P4.3 because UDP,
-  syscall-rate, CPU-utilisation, and the host-to-guest small-transfer issue
-  remain open.
+- this refresh improves the TCP story, but it does not close P4.3 because
+  broader UDP, syscall-rate, CPU-utilisation, and the host-to-guest
+  small-transfer issue remain open.
+
+## UDP Harness Extension: 2026-06-11
+
+The helper now accepts `UML_VECTOR_PERF_PROTOCOL=tcp|udp` or
+`--protocol tcp|udp`. TCP remains the default. UDP mode sends the requested
+fixed byte count as datagrams and treats missing bytes as a failed run instead
+of reporting a partial throughput result.
+
+Additional knobs:
+
+- `UML_VECTOR_PERF_UDP_PAYLOAD`, default `1472`;
+- `UML_VECTOR_PERF_UDP_PACE_USEC`, default `0`.
+
+The summary file now includes a trailing `protocol` column.
+
+Validation:
+
+```sh
+bash -n tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh
+tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh --help
+
+rm -rf /tmp/um-vector-perf-tcp-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-tcp-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=guest-to-host \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19140 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+
+rm -rf /tmp/um-vector-perf-udp-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-udp-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19141 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Results:
+
+- TCP compatibility smoke PASS with `protocol=tcp` in the guest/host lines and
+  summary row.
+- Vector2 UDP bidirectional smoke PASS.
+
+Paced 1 MiB UDP matrix:
+
+```sh
+rm -rf /tmp/um-vector-perf-udp-1m-paced
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-udp-1m-paced \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19144 \
+UML_VECTOR_PERF_UDP_PACE_USEC=100 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Host-side MiB/s:
+
+```text
+driver   direction       host_mib_s
+vector   guest-to-host   7.471
+vector   host-to-guest   8.760
+vector2  guest-to-host   7.319
+vector2  host-to-guest   8.660
+```
+
+An unpaced 1 MiB UDP matrix attempt completed the legacy vector guest-to-host
+row, but legacy vector host-to-guest did not reach the exact-byte completion
+marker after the host sent the full payload. Treat that as useful negative
+evidence and keep unpaced/larger UDP coverage open for the final publication
+matrix.
 
 ## Interpretation
 

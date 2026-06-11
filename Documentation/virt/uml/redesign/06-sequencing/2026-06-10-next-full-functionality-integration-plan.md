@@ -884,7 +884,10 @@ Acceptance gates:
   runtime `vnet_hdr` state. The 1 MiB host-to-guest fixed-byte cell remains
   open: the fd/vnet allocation fix rerun showed vector2 median 0.895 MiB/s
   versus legacy vector median 0.976 MiB/s, and this was treated as a
-  correctness fix rather than replacement-readiness closure.
+  correctness fix rather than replacement-readiness closure. The fixed-byte
+  helper now supports UDP; initial paced 1 MiB UDP evidence passes for legacy
+  vector and vector2, while unpaced/larger UDP still needs publication
+  coverage.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
@@ -1489,7 +1492,10 @@ Runtime smoke:
   green after TX/RX NAPI scheduling and lazy-RX cleanup; RX checksum feature
   reporting and fd/vnet RX allocation are aligned with the vnet-header
   datapath. The 1 MiB host-to-guest fixed-byte cell remains below the final
-  publication bar and needs the next bottleneck pass.
+  publication bar and needs the next bottleneck pass. The fixed-byte helper
+  now also supports UDP; initial paced 1 MiB UDP evidence passes for legacy
+  vector and vector2, while unpaced/larger UDP still needs publication
+  coverage.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only

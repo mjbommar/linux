@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Collect a small TCP baseline for UML vector networking.
+# Collect a small TCP/UDP baseline for UML vector networking.
 #
 # This is intentionally a lightweight harness, not a benchmark suite.  It
 # keeps the Umlfile shape stable and switches only the network driver so
@@ -11,22 +11,25 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-usage: vector-net-perf-baseline.sh [--kernel PATH] [--drivers LIST] [--direction DIR] [--bytes N] [--bytes-list LIST] [--repeat N] [--out DIR]
+usage: vector-net-perf-baseline.sh [--kernel PATH] [--drivers LIST] [--direction DIR] [--protocol tcp|udp] [--bytes N] [--bytes-list LIST] [--repeat N] [--out DIR]
 
 Environment overrides:
   UML_KERNEL                 UML kernel path when --kernel is omitted
   UML_VECTOR_PERF_DRIVERS    comma-separated drivers, default: vector,vector2
   UML_VECTOR_PERF_DIRECTION  guest-to-host, host-to-guest, or both; default: guest-to-host
-  UML_VECTOR_PERF_BYTES      bytes sent by the guest per run, default: 33554432
+  UML_VECTOR_PERF_PROTOCOL   tcp or udp, default: tcp
+  UML_VECTOR_PERF_BYTES      bytes sent by the active sender per run, default: 33554432
   UML_VECTOR_PERF_BYTES_LIST comma-separated byte counts; overrides UML_VECTOR_PERF_BYTES
   UML_VECTOR_PERF_REPEAT     repetitions per driver/direction/size, default: 1
-  UML_VECTOR_PERF_PORT       host TCP sink port, default: 19091
+  UML_VECTOR_PERF_PORT       host/guest sink port, default: 19091
   UML_VECTOR_PERF_BACKEND    umlctl backend, default: seccomp
   UML_VECTOR_PERF_HOST_MODE  vector2 host mode: auto, fd, or inproc; default: auto
   UML_VECTOR_PERF_QUEUES     vector2 queue intent, default: auto
   UML_VECTOR_PERF_TCP_NODELAY set TCP_NODELAY on active TCP sender, default: 0
   UML_VECTOR_PERF_HOST_CHUNK host sender chunk size, default: 65536
   UML_VECTOR_PERF_GUEST_CHUNK guest sender chunk size, default: 65536
+  UML_VECTOR_PERF_UDP_PAYLOAD UDP payload size per datagram, default: 1472
+  UML_VECTOR_PERF_UDP_PACE_USEC sleep between UDP datagrams, default: 0
   UML_VECTOR_PERF_OUT        output directory, default: /tmp/um-vector-perf-baseline
 EOF
 }
@@ -35,6 +38,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 kernel="${UML_KERNEL:-}"
 drivers="${UML_VECTOR_PERF_DRIVERS:-vector,vector2}"
 direction="${UML_VECTOR_PERF_DIRECTION:-guest-to-host}"
+protocol="${UML_VECTOR_PERF_PROTOCOL:-tcp}"
 bytes="${UML_VECTOR_PERF_BYTES:-33554432}"
 bytes_list="${UML_VECTOR_PERF_BYTES_LIST:-}"
 repeat="${UML_VECTOR_PERF_REPEAT:-1}"
@@ -45,6 +49,8 @@ queues="${UML_VECTOR_PERF_QUEUES:-auto}"
 tcp_nodelay="${UML_VECTOR_PERF_TCP_NODELAY:-0}"
 host_chunk="${UML_VECTOR_PERF_HOST_CHUNK:-65536}"
 guest_chunk="${UML_VECTOR_PERF_GUEST_CHUNK:-65536}"
+udp_payload="${UML_VECTOR_PERF_UDP_PAYLOAD:-1472}"
+udp_pace_usec="${UML_VECTOR_PERF_UDP_PACE_USEC:-0}"
 out="${UML_VECTOR_PERF_OUT:-/tmp/um-vector-perf-baseline}"
 
 while [[ $# -gt 0 ]]; do
@@ -59,6 +65,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--direction)
 		direction="$2"
+		shift 2
+		;;
+	--protocol)
+		protocol="$2"
 		shift 2
 		;;
 	--bytes)
@@ -109,6 +119,14 @@ guest-to-host|host-to-guest|both)
 	exit 2
 	;;
 esac
+case "$protocol" in
+tcp|udp)
+	;;
+*)
+	echo "protocol must be tcp or udp (got $protocol)" >&2
+	exit 2
+	;;
+esac
 case "$host_mode" in
 auto|fd|inproc)
 	;;
@@ -133,6 +151,14 @@ if [[ "$guest_chunk" == '' || "$guest_chunk" == *[!0-9]* || "$guest_chunk" -lt 1
 	echo "guest chunk size must be a positive integer (got $guest_chunk)" >&2
 	exit 2
 fi
+if [[ "$udp_payload" == '' || "$udp_payload" == *[!0-9]* || "$udp_payload" -lt 1 || "$udp_payload" -gt 65507 ]]; then
+	echo "UDP payload size must be an integer between 1 and 65507 (got $udp_payload)" >&2
+	exit 2
+fi
+if [[ "$udp_pace_usec" == '' || "$udp_pace_usec" == *[!0-9]* ]]; then
+	echo "UDP pace must be a non-negative integer in microseconds (got $udp_pace_usec)" >&2
+	exit 2
+fi
 
 if [[ -z "$bytes_list" ]]; then
 	bytes_list="$bytes"
@@ -147,7 +173,7 @@ done
 
 mkdir -p "$out"
 summary="$out/summary.tsv"
-printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\n' > "$summary"
+printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\n' > "$summary"
 
 queue_toml() {
 	local driver="$1"
@@ -175,36 +201,60 @@ start_sink() {
 	local host_log="$1"
 	local run_bytes="$2"
 
-	python3 -u - "$port" "$run_bytes" >"$host_log" 2>&1 <<'PY' &
+	python3 -u - "$port" "$run_bytes" "$protocol" "$udp_payload" >"$host_log" 2>&1 <<'PY' &
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
 expected = int(sys.argv[2])
+protocol = sys.argv[3]
+udp_payload = int(sys.argv[4])
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", port))
-    sock.listen(1)
-    print(f"HOST_SINK_READY port={port}", flush=True)
-    conn, addr = sock.accept()
-    with conn:
-        start = time.monotonic()
+if protocol == "tcp":
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.listen(1)
+        print(f"HOST_SINK_READY protocol=tcp port={port}", flush=True)
+        conn, addr = sock.accept()
+        with conn:
+            start = time.monotonic()
+            received = 0
+            while True:
+                data = conn.recv(1024 * 1024)
+                if not data:
+                    break
+                received += len(data)
+else:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.settimeout(20)
+        print(f"HOST_SINK_READY protocol=udp port={port}", flush=True)
         received = 0
-        while True:
-            data = conn.recv(1024 * 1024)
-            if not data:
+        addr = None
+        start = None
+        while received < expected:
+            try:
+                data, addr = sock.recvfrom(max(udp_payload, 1) + 64)
+            except TimeoutError:
                 break
+            if start is None:
+                start = time.monotonic()
             received += len(data)
-        elapsed = max(time.monotonic() - start, 1e-9)
-        mib_s = received / 1048576.0 / elapsed
-        print(
-            f"HOST_SINK bytes={received} seconds={elapsed:.6f} mib_s={mib_s:.3f} addr={addr}",
-            flush=True,
-        )
-        if received != expected:
-            sys.exit(3)
+        if start is None:
+            start = time.monotonic()
+
+elapsed = max(time.monotonic() - start, 1e-9)
+mib_s = received / 1048576.0 / elapsed
+print(
+    f"HOST_SINK protocol={protocol} bytes={received} seconds={elapsed:.6f} "
+    f"mib_s={mib_s:.3f} addr={addr}",
+    flush=True,
+)
+if received != expected:
+    sys.exit(3)
 PY
 	SINK_PID=$!
 }
@@ -219,7 +269,7 @@ wait_sink_ready() {
 		fi
 		sleep 0.1
 	done
-	echo "host TCP sink did not become ready" >&2
+	echo "host $protocol sink did not become ready" >&2
 	cat "$host_log" >&2 || true
 	return 1
 }
@@ -229,7 +279,7 @@ host_send() {
 	local host_log="$2"
 	local run_bytes="$3"
 
-	python3 -u - "$guest_ip" "$port" "$run_bytes" "$tcp_nodelay" "$host_chunk" >"$host_log" 2>&1 <<'PY'
+	python3 -u - "$guest_ip" "$port" "$run_bytes" "$protocol" "$tcp_nodelay" "$host_chunk" "$udp_payload" "$udp_pace_usec" >"$host_log" 2>&1 <<'PY'
 import socket
 import sys
 import time
@@ -237,22 +287,41 @@ import time
 host = sys.argv[1]
 port = int(sys.argv[2])
 total = int(sys.argv[3])
-nodelay = int(sys.argv[4])
-chunk = bytes(int(sys.argv[5]))
+protocol = sys.argv[4]
+nodelay = int(sys.argv[5])
+tcp_chunk = int(sys.argv[6])
+udp_payload = int(sys.argv[7])
+udp_pace = int(sys.argv[8]) / 1_000_000.0
 sent = 0
 
 start = time.monotonic()
-with socket.create_connection((host, port), timeout=20) as sock:
-    if nodelay:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    while sent < total:
-        n = min(len(chunk), total - sent)
-        sock.sendall(chunk[:n])
-        sent += n
-    sock.shutdown(socket.SHUT_WR)
+if protocol == "tcp":
+    chunk = bytes(tcp_chunk)
+    with socket.create_connection((host, port), timeout=20) as sock:
+        if nodelay:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        while sent < total:
+            n = min(len(chunk), total - sent)
+            sock.sendall(chunk[:n])
+            sent += n
+        sock.shutdown(socket.SHUT_WR)
+else:
+    chunk = bytes(udp_payload)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect((host, port))
+        while sent < total:
+            n = min(len(chunk), total - sent)
+            sock.send(chunk[:n])
+            sent += n
+            if udp_pace:
+                time.sleep(udp_pace)
 elapsed = max(time.monotonic() - start, 1e-9)
 mib_s = sent / 1048576.0 / elapsed
-print(f"HOST_SEND bytes={sent} seconds={elapsed:.6f} mib_s={mib_s:.3f}", flush=True)
+print(
+    f"HOST_SEND protocol={protocol} bytes={sent} seconds={elapsed:.6f} "
+    f"mib_s={mib_s:.3f}",
+    flush=True,
+)
 PY
 }
 
@@ -304,22 +373,40 @@ import time
 host = sys.argv[1]
 port = int(sys.argv[2])
 total = int(sys.argv[3])
+protocol = os.environ.get("UML_VECTOR_PERF_PROTOCOL", "tcp")
 nodelay = int(os.environ.get("UML_VECTOR_PERF_TCP_NODELAY", "0"))
-chunk = bytes(int(os.environ.get("UML_VECTOR_PERF_GUEST_CHUNK", "65536")))
+tcp_chunk = int(os.environ.get("UML_VECTOR_PERF_GUEST_CHUNK", "65536"))
+udp_payload = int(os.environ.get("UML_VECTOR_PERF_UDP_PAYLOAD", "1472"))
+udp_pace = int(os.environ.get("UML_VECTOR_PERF_UDP_PACE_USEC", "0")) / 1_000_000.0
 sent = 0
 start = time.monotonic()
-with socket.create_connection((host, port), timeout=20) as sock:
-    if nodelay:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    while sent < total:
-        n = min(len(chunk), total - sent)
-        sock.sendall(chunk[:n])
-        sent += n
-    sock.shutdown(socket.SHUT_WR)
+if protocol == "tcp":
+    chunk = bytes(tcp_chunk)
+    with socket.create_connection((host, port), timeout=20) as sock:
+        if nodelay:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        while sent < total:
+            n = min(len(chunk), total - sent)
+            sock.sendall(chunk[:n])
+            sent += n
+        sock.shutdown(socket.SHUT_WR)
+elif protocol == "udp":
+    chunk = bytes(udp_payload)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect((host, port))
+        while sent < total:
+            n = min(len(chunk), total - sent)
+            sent += sock.send(chunk[:n])
+            if udp_pace:
+                time.sleep(udp_pace)
+else:
+    print(f"unsupported protocol={protocol}", file=sys.stderr)
+    sys.exit(2)
 elapsed = max(time.monotonic() - start, 1e-9)
 mib_s = sent / 1048576.0 / elapsed
 print(
     "VECTOR_NET_PERF "
+    f"protocol={protocol} "
     "direction=guest-to-host "
     f"driver={os.environ.get('UMLCTL_NETWORK_DRIVER', '')} "
     f"transport={os.environ.get('UMLCTL_NETWORK_TRANSPORT', '')} "
@@ -370,33 +457,61 @@ import time
 
 port = int(sys.argv[1])
 expected = int(sys.argv[2])
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", port))
-    sock.listen(1)
-    print("GUEST_SINK_READY", flush=True)
-    conn, addr = sock.accept()
-    with conn:
-        start = time.monotonic()
+protocol = os.environ.get("UML_VECTOR_PERF_PROTOCOL", "tcp")
+udp_payload = int(os.environ.get("UML_VECTOR_PERF_UDP_PAYLOAD", "1472"))
+
+if protocol == "tcp":
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.listen(1)
+        print("GUEST_SINK_READY", flush=True)
+        conn, addr = sock.accept()
+        with conn:
+            start = time.monotonic()
+            received = 0
+            while True:
+                data = conn.recv(1024 * 1024)
+                if not data:
+                    break
+                received += len(data)
+elif protocol == "udp":
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.settimeout(20)
+        print("GUEST_SINK_READY", flush=True)
         received = 0
-        while True:
-            data = conn.recv(1024 * 1024)
-            if not data:
+        addr = None
+        start = None
+        while received < expected:
+            try:
+                data, addr = sock.recvfrom(max(udp_payload, 1) + 64)
+            except TimeoutError:
                 break
+            if start is None:
+                start = time.monotonic()
             received += len(data)
-        elapsed = max(time.monotonic() - start, 1e-9)
-        mib_s = received / 1048576.0 / elapsed
-        print(
-            "VECTOR_NET_PERF "
-            "direction=host-to-guest "
-            f"driver={os.environ.get('UMLCTL_NETWORK_DRIVER', '')} "
-            f"transport={os.environ.get('UMLCTL_NETWORK_TRANSPORT', '')} "
-            f"queues={os.environ.get('UMLCTL_NETWORK_QUEUES', '')} "
-            f"bytes={received} seconds={elapsed:.6f} mib_s={mib_s:.3f} "
-            f"addr={addr}"
-        )
-        if received != expected:
-            sys.exit(3)
+        if start is None:
+            start = time.monotonic()
+else:
+    print(f"unsupported protocol={protocol}", file=sys.stderr)
+    sys.exit(2)
+
+elapsed = max(time.monotonic() - start, 1e-9)
+mib_s = received / 1048576.0 / elapsed
+print(
+    "VECTOR_NET_PERF "
+    f"protocol={protocol} "
+    "direction=host-to-guest "
+    f"driver={os.environ.get('UMLCTL_NETWORK_DRIVER', '')} "
+    f"transport={os.environ.get('UMLCTL_NETWORK_TRANSPORT', '')} "
+    f"queues={os.environ.get('UMLCTL_NETWORK_QUEUES', '')} "
+    f"bytes={received} seconds={elapsed:.6f} mib_s={mib_s:.3f} "
+    f"addr={addr}"
+)
+if received != expected:
+    sys.exit(3)
 PY
 rc=$?
 echo "VECTOR_NET_DIAG_BEGIN after direction=host-to-guest dev=$DEV"
@@ -426,12 +541,13 @@ run_driver() {
 	local repeat_idx="$4"
 	local safe_driver="${driver//[^A-Za-z0-9_.-]/_}"
 	local safe_dir="${perf_dir//[^A-Za-z0-9_.-]/_}"
-	local run_dir="$out/${safe_driver}-${safe_dir}-b${run_bytes}-r${repeat_idx}"
+	local safe_protocol="${protocol//[^A-Za-z0-9_.-]/_}"
+	local run_dir="$out/${safe_driver}-${safe_dir}-${safe_protocol}-b${run_bytes}-r${repeat_idx}"
 	local umlf="$run_dir/Umlfile.toml"
 	local umlctl_log="$run_dir/umlctl-up.log"
 	local guest_log="$run_dir/guest.log"
-	local host_log="$run_dir/host-${safe_dir}.log"
-	local name="vperf-$safe_driver-$safe_dir-b${run_bytes}-r${repeat_idx}"
+	local host_log="$run_dir/host-${safe_dir}-${safe_protocol}.log"
+	local name="vperf-$safe_driver-$safe_dir-$safe_protocol-b${run_bytes}-r${repeat_idx}"
 	local driver_tag="vec"
 	local dir_tag="g2h"
 	local tap
@@ -453,7 +569,7 @@ schema_version = 1
 
 [instance]
 name = "$name"
-labels = { service = "vector-net-perf", driver = "$driver" }
+labels = { service = "vector-net-perf", driver = "$driver", protocol = "$protocol" }
 
 [kernel]
 path = "$kernel"
@@ -482,8 +598,11 @@ PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
 UML_VECTOR_PERF_BYTES = "$run_bytes"
 UML_VECTOR_PERF_REPEAT = "$repeat_idx"
 UML_VECTOR_PERF_PORT = "$port"
+UML_VECTOR_PERF_PROTOCOL = "$protocol"
 UML_VECTOR_PERF_TCP_NODELAY = "$tcp_nodelay"
 UML_VECTOR_PERF_GUEST_CHUNK = "$guest_chunk"
+UML_VECTOR_PERF_UDP_PAYLOAD = "$udp_payload"
+UML_VECTOR_PERF_UDP_PACE_USEC = "$udp_pace_usec"
 
 [[init.phases]]
 name = "network-metadata"
@@ -520,7 +639,7 @@ EOF
 		if ! wait "$sink_pid"; then
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
-			echo "host TCP sink failed for driver=$driver; see $host_log" >&2
+			echo "host $protocol sink failed for driver=$driver; see $host_log" >&2
 			return 1
 		fi
 		trap - RETURN
@@ -537,7 +656,7 @@ EOF
 		if ! host_send "10.93.0.2" "$host_log" "$run_bytes"; then
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
-			echo "host TCP send failed for driver=$driver; see $host_log" >&2
+			echo "host $protocol send failed for driver=$driver; see $host_log" >&2
 			return 1
 		fi
 		if ! wait_guest_marker "$name" VECTOR_NET_PERF_OK "$guest_log"; then
@@ -558,9 +677,9 @@ EOF
 	host_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 	host_mib_s="$(sed -n 's/.* mib_s=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$guest_seconds" "$guest_mib_s" \
-		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" >> "$summary"
+		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" >> "$summary"
 	echo "$guest_line"
 	echo "$host_line"
 }

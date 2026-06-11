@@ -258,7 +258,7 @@ tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
 
 Acceptance still requires the broader matrix from
 `08-future-phases/49-uml-vector-driver-v2-validation-gates-2026-05-17.md`:
-bidirectional TCP, UDP, syscall-rate, CPU-utilisation, and longer multiqueue
-fairness profiles, plus the natural long-run and KVM-v2 Tier 3 networking
-gates.  Until those runs pass, vector2 remains opt-in and not a replacement for
-legacy vector.
+bidirectional TCP, broader UDP beyond the initial paced fixed-byte matrix,
+syscall-rate, CPU-utilisation, and longer multiqueue fairness profiles, plus
+the natural long-run and KVM-v2 Tier 3 networking gates.  Until those runs
+pass, vector2 remains opt-in and not a replacement for legacy vector.
