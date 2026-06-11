@@ -151,8 +151,8 @@ record container control surface:
     the singleton to ``init`` state; the storage stays allocated for the
     lifetime of the UML instance so no live dispatcher can observe freed
     record memory. ``replay`` restores the attached snapshot before
-    entering the experimental syscall replay core, but deterministic
-    workload replay is not yet a supported user workflow.
+    entering the experimental syscall replay core. General deterministic
+    workload replay remains outside the stable user ABI.
 
 ``kvm_v2_record_status``
     Read-only status and counters. Example after stopping a live record
@@ -191,36 +191,16 @@ record container control surface:
       last_replay_failure_syscall: -1
       last_replay_failure_rc: 0
 
-The record path is still explicitly experimental. It can record live
-KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
-bypass path, and it can pair a record session with a KVM v2 task snapshot.
-It can also round-trip UML time-travel clock advances through the record
-log. The status counters identify whether recorded syscalls came from the
-snapshot owner or from other tasks, which lets selftests distinguish a
-task-owned record run from a control-file writer that merely enabled
-recording for later work. The first payload-aware syscalls are ``uname(2)``,
-which records the returned ``struct new_utsname``, and ``getcwd(2)``, which
-records the returned path bytes. Replay mode can restore those payloads when
-the syscall number and arguments match. Strict replay currently allows the
-R/R-1 scalar task-owned subset (``getpid``, ``getppid``, ``gettid``) plus
-payload-aware ``uname(2)`` and ``getcwd(2)``; other syscalls fail closed and
-update the strict replay failure counters instead of falling back to live
-execution. Raw time syscalls such as ``clock_gettime(2)``, ``gettimeofday(2)``,
-and ``time(2)`` are outside the current replay set, and replay mode disables
-direct user ``RDTSC``/``RDTSCP`` with CR4.TSD so those observations fail
-closed instead of escaping the log. Replay mode also asks KVM to block
-``SIGALRM`` while the vCPU is inside ``KVM_RUN`` so timer delivery cannot
-create an unrecorded in-guest ``EINTR`` point; pending UML timer work is
-handled after the VM exit. Workloads that require precise asynchronous signal
-delivery remain outside the current R/R-1 contract. Strict replay also rejects
-randomness and external I/O syscalls outside the supported subset, including
-``getrandom(2)`` and representative ``openat(2)``, ``read(2)``, ``write(2)``,
-and ``ioctl(2)`` paths, instead of replaying them as scalar-only entries. Full
-deterministic replay still needs broader payload coverage plus replayable
-device, network, and hostfs policies described in the redesign plan. The
-current in-memory event format is versioned and debugfs reports its header
-size, total fixed entry size, and maximum variable payload length so
-validation tools can reject stale logs instead of guessing their shape.
+The record path is still explicitly experimental. It can record live KVM v2
+syscall returns through the host dispatcher and LSTAR gadget bypass path, pair
+a record session with a KVM v2 task snapshot, and round-trip UML time-travel
+clock advances through the record log. The current in-memory event format is
+versioned and debugfs reports its header size, total fixed entry size, and
+maximum variable payload length so validation tools can reject stale logs
+instead of guessing their shape. See
+``Documentation/virt/uml/kvm-v2-record-replay.rst`` for the supported
+experimental determinism tier, strict fail-closed policy, validation path, and
+remaining non-goals.
 
 KVM v2 state trace controls
 ===========================

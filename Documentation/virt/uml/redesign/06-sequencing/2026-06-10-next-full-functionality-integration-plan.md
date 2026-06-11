@@ -678,9 +678,12 @@ Current `next` checkpoint:
   recording, task-owned 386-entry deterministic replay, live supported-syscall
   mismatch rejection through `getcwd(2)`, and live unsupported-syscall
   rejection through `getrandom(2)`.
-- Still open: raw time/RDTSC/signal determinism, supported replay tier docs,
-  broader deterministic workload coverage, and replayable device/network/hostfs
-  event policy.
+- Validation on 2026-06-11 after the public determinism-tier documentation:
+  `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
+  experimental task-owned replay tier, replayable syscall subset, strict
+  fail-closed policy, validation command, and non-goals.
+- Still open: raw time/RDTSC/signal determinism, broader deterministic workload
+  coverage, and replayable device/network/hostfs event policy.
 
 Acceptance gates:
 
@@ -695,7 +698,8 @@ Acceptance gates:
   gadget-on hot path are covered, and record/replay now forces gadget-handled
   syscalls through the live dispatcher; side-by-side gadget-on/off workload
   equivalence remains open if required for publication.
-- Documentation of supported determinism tier.
+- Documentation of supported determinism tier. Current status: documented in
+  `Documentation/virt/uml/kvm-v2-record-replay.rst`.
 
 ## Workstream D: KVM State Trace And Diagnostics
 

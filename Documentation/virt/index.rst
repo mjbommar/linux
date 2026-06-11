@@ -17,6 +17,7 @@ Virtualization Support
    uml/kprobes
    uml/kmsan
    uml/snapshot
+   uml/kvm-v2-record-replay
    uml/launcher
    uml/aperf-mperf
    uml/profiles/index
