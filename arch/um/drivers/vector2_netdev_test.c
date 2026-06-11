@@ -87,6 +87,40 @@ static void vector2_netdev_open_unwinds_missing_backend_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_netdev_rejects_parser_only_transports_test(struct kunit *test)
+{
+	static const enum um_vec2_transport parser_only[] = {
+		UM_VEC2_TRANSPORT_RAW,
+		UM_VEC2_TRANSPORT_GRE,
+		UM_VEC2_TRANSPORT_L2TPV3,
+		UM_VEC2_TRANSPORT_HYBRID,
+		UM_VEC2_TRANSPORT_BESS,
+		UM_VEC2_TRANSPORT_VDE,
+		UM_VEC2_TRANSPORT_PROXY,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(parser_only); i++) {
+		struct um_vec2_dev *vdev;
+		struct net_device *dev;
+		int ret;
+
+		vdev = vector2_netdev_test_alloc_vdev(test, 100 + i);
+		vdev->cfg.transport = parser_only[i];
+		dev = vector2_netdev_test_alloc(test, vdev);
+
+		ret = um_vec2_netdev_open(dev);
+
+		KUNIT_EXPECT_EQ_MSG(test, ret, -EOPNOTSUPP,
+				    "transport=%s",
+				    um_vec2_transport_name(parser_only[i]));
+		KUNIT_EXPECT_EQ(test, vdev->life.state, UM_VEC2_DEV_REGISTERED);
+		KUNIT_EXPECT_FALSE(test, netif_carrier_ok(dev));
+
+		free_netdev(dev);
+	}
+}
+
 static void vector2_netdev_stop_registered_is_safe_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev;
@@ -484,6 +518,7 @@ static void vector2_netdev_poll_rx_eproto_test(struct kunit *test)
 static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_name_and_mac_test),
 	KUNIT_CASE(vector2_netdev_open_unwinds_missing_backend_test),
+	KUNIT_CASE(vector2_netdev_rejects_parser_only_transports_test),
 	KUNIT_CASE(vector2_netdev_stop_registered_is_safe_test),
 	KUNIT_CASE(vector2_netdev_xmit_drops_when_not_running_test),
 	KUNIT_CASE(vector2_netdev_uses_configured_queue_count_test),

@@ -761,10 +761,10 @@ Current `next` contains:
 
 Required functionality:
 
-- Confirm all intended transports and modes from historical vector work:
-  fd, tap, proxy, raw, gre, l2tpv3, vde, bess, hybrid.
-- If some transports are parser-only or not implemented, either implement them
-  or remove/mark them as unsupported.
+- Keep the vector2 runtime transport claim limited to TAP and inherited fd.
+  GRE and L2TPv3 are parser/header-helper coverage only; raw, proxy, VDE,
+  BESS, and hybrid are unsupported by the current netdev datapath and require
+  new backends plus live smokes before they can re-enter the runtime claim.
 - Keep multiqueue fd handoff validated and complete fairness/performance
   validation.
 - Keep sandbox validation for untrusted mode green.
@@ -792,6 +792,9 @@ Acceptance gates:
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
+- parser-only transport boundary. Current status: KUnit guards raw, GRE,
+  L2TPv3, hybrid, BESS, VDE, and proxy returning `-EOPNOTSUPP` from the
+  netdev open path; GRE/L2TPv3 header-helper KUnit remains present.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
 - Long soak.
@@ -1257,6 +1260,9 @@ Runtime smoke:
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
+- Vector2 parser-only transport boundary. Current status: TAP/fd are the only
+  runtime netdev transports; raw/GRE/L2TPv3/hybrid/BESS/VDE/proxy are guarded
+  as unsupported by the current netdev path.
 - Syzkaller shim smoke.
 
 Longer gates:

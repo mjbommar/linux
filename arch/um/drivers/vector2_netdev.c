@@ -106,9 +106,9 @@ static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 		return um_vec2_fd_open(vdev);
 	default:
 		/*
-		 * The cmdline parser accepts transport names that are not
-		 * backed by this netdev datapath. Surface that explicitly
-		 * instead of leaving userspace with a bare -EOPNOTSUPP.
+		 * The parser keeps compatibility and protocol-helper transport
+		 * names, but this netdev datapath is intentionally limited to
+		 * TAP and inherited fd backends.
 		 */
 		pr_err("vec2.%u transport=%s is unsupported by this netdev path; use transport=tap or transport=fd\n",
 		       vdev->unit,

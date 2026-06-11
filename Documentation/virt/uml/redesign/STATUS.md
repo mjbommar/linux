@@ -120,6 +120,11 @@ run:
   in-process TAP path: `umlctl up` reports `transport=tap host_mode=inproc`,
   does not inherit launcher-owned TAP fds, the guest reports TAP/inproc
   metadata with no fd count, and a one-packet host TAP ping succeeds.
+- The vector2 runtime transport claim is bounded to TAP and inherited fd.
+  GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
+  BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
+  guards that parser-only transports fail explicitly with `-EOPNOTSUPP`
+  instead of being counted as implemented runtime transports.
 
 Open vector2 publication work:
 
@@ -224,6 +229,10 @@ Current boundary:
 - `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
   `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
   and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;
+- vector2 parser-only transports are explicitly outside the current runtime
+  transport claim: only TAP and inherited fd are netdev-backed; raw, GRE,
+  L2TPv3, hybrid, BESS, VDE, and proxy return `-EOPNOTSUPP` from the netdev
+  open path, with GRE/L2TPv3 header helpers retained under KUnit coverage;
 - `vector2-inproc-tap-smoke` validates the explicit trusted vector2
   in-process TAP path: `umlctl up` reports `transport=tap host_mode=inproc`,
   no launcher-owned fd inheritance is reported, guest metadata reports
