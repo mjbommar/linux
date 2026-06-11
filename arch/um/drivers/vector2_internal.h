@@ -14,6 +14,7 @@
 #include <linux/netdevice.h>
 #include <linux/spinlock.h>
 #include <linux/skbuff.h>
+#include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/virtio_net.h>
 
@@ -33,7 +34,7 @@ enum um_vec2_stat_counter {
 	UM_VEC2_STAT_CLOSES,
 	UM_VEC2_STAT_NAPI_POLLS,
 	UM_VEC2_STAT_RX_IRQS,
-	UM_VEC2_STAT_TX_IRQS,
+	UM_VEC2_STAT_TX_RETRY_WAKEUPS,
 	UM_VEC2_STAT_TX_XMIT_CALLS,
 	UM_VEC2_STAT_TX_BUSY,
 	UM_VEC2_STAT_TX_DROPPED,
@@ -83,8 +84,10 @@ struct um_vec2_channel {
 	int tx_irq;
 	bool vnet_hdr;
 	bool rx_pending;
+	bool tx_retry_timer_setup;
 	bool napi_added;
 	bool napi_enabled;
+	struct timer_list tx_retry_timer;
 };
 
 struct um_vec2_dev {

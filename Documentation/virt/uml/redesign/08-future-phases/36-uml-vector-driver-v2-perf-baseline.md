@@ -1073,14 +1073,92 @@ current hint, but it still misses the median no-regression bar.  The next
 implementation target is vector2 queue selection plus wakeup/receive
 scheduling policy, not fd handoff alone.
 
+## 1 MiB Host-To-Guest No-TX-Write-IRQ Rerun: 2026-06-11
+
+The next implementation pass removed permanent TAP/fd `IRQ_WRITE`
+registration from vector2.  TX still starts from `ndo_start_xmit()` and NAPI;
+when a TX poll finds queued descriptors but makes no progress, a bounded retry
+timer schedules the next NAPI pass.  The goal is to avoid always-write-ready
+host fds waking receive-only workloads while still recovering from transient
+TX backpressure.
+
+Validation before the perf rerun:
+
+- `make ARCH=um -j$(nproc)` PASS;
+- `um_vector2_*` KUnit PASS: 96 pass, 0 fail, 2 trusted-TAP skips, including
+  RX-only IRQ and TX-stall retry-timer coverage;
+- `vector2-fd-handoff-smoke` PASS;
+- `vector2-fd-multiqueue-smoke` PASS;
+- `vector2-inproc-tap-smoke` PASS;
+- `vector2-pool-tap-smoke` PASS with `UM_FORK_KERNEL=$PWD/linux`;
+- `vector2-sandbox-audit` PASS;
+- vector2 64 KiB guest-to-host TCP sanity PASS.
+
+Focused host-to-guest command:
+
+```sh
+rm -rf /tmp/um-vector2-h2g-1m-no-txirq-default-r3
+UML_VECTOR_PERF_OUT=/tmp/um-vector2-h2g-1m-no-txirq-default-r3 \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_PROTOCOL=tcp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=3 \
+UML_VECTOR_PERF_PORT=19220 \
+UML_VECTOR_PERF_PERF_STAT=1 \
+UML_VECTOR_PERF_PERF_SECONDS=1 \
+  timeout 1800s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+`aggregate.tsv`:
+
+| Driver | Host median MiB/s | Host best MiB/s | UML system CPU median | Scheduler pcount median |
+| --- | ---: | ---: | ---: | ---: |
+| vector | 1.397 | 1.865 | 0.710 | 12106 |
+| vector2 | 1.256 | 1.272 | 0.670 | 23195 |
+
+`comparison.tsv`:
+
+| Ratio | Value |
+| --- | ---: |
+| guest median MiB/s | 0.870290 |
+| host median MiB/s | 0.899069 |
+| host best MiB/s | 0.682038 |
+| UML system CPU median | 0.943662 |
+| scheduler pcount median | 1.915992 |
+| voluntary context switches median | 1.915411 |
+
+`perf-window-comparison.tsv`:
+
+| Transfer-window perf ratio | Value |
+| --- | ---: |
+| syscalls total | 0.315536 |
+| task-clock | 0.362255 |
+| CPU-clock | 0.382149 |
+| context switches | 0.205458 |
+| cycles | 0.249015 |
+| instructions | 0.256904 |
+
+This is a material improvement over the prior default fd/multiqueue sweep
+result, where the host-side median ratio was 0.650602.  It also reverses the
+earlier transfer-window perf shape: in this short run vector2 used fewer
+syscalls, less task-clock, and fewer context switches than legacy vector during
+the measured transfer window.  It is still not final publication closure:
+vector2 trails legacy on best host throughput, and the UML process scheduler
+pcount/voluntary context-switch deltas remain about 1.916x legacy vector.  The
+next gate needs broader repeats plus the full Tier 3, fairness, syscall-rate,
+and CPU-utilisation matrix.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
 guest-to-host run, vector2 fd multiqueue was originally slower than legacy
 vector TAP.  The 2026-06-11 TX/RX NAPI scheduling fix removed that broad
-guest-to-host TCP regression in the current fixed-byte refresh.  Host-to-guest
-is now mixed: vector2 is strong at larger sizes in this harness, but the 1 MiB
-cell remains below legacy.
+guest-to-host TCP regression in the current fixed-byte refresh.  The later
+no-TX-write-IRQ retry-timer slice materially improves the 1 MiB host-to-guest
+fd/multiqueue median, but final publication still needs broader repeat,
+fairness, Tier 3, syscall-rate, and CPU-utilisation evidence.
 
 The immediate value is that future vector2 changes now have a simple
 side-by-side `umlctl` command to catch large regressions and to track
@@ -1094,7 +1172,8 @@ The full replacement performance gate still needs:
 - UDP packet rate;
 - larger repeat counts and more host/kernel samples for the TCP size
   sweep;
-- host-to-guest small-transfer follow-up;
+- broader host-to-guest small-transfer repeat/fairness coverage after the
+  no-TX-write-IRQ retry-timer improvement;
 - use the fixed-byte harness diagnostics to compare RX IRQ, NAPI, and batch
   counters plus UML process metric deltas between legacy and vector2;
 - inspect host-to-guest queue selection and wakeup/readiness/receive

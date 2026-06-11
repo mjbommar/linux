@@ -354,7 +354,22 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 	return rx_done;
 }
 
+static void um_vec2_tx_retry_timer(struct timer_list *timer)
+{
+	struct um_vec2_channel *channel =
+		timer_container_of(channel, timer, tx_retry_timer);
+	struct um_vec2_dev *vdev = channel->vdev;
+	struct net_device *dev = vdev ? vdev->netdev : NULL;
+
+	if (!dev || !channel->napi_enabled || !netif_running(dev))
+		return;
+
+	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_RETRY_WAKEUPS);
+	napi_schedule(&channel->napi);
+}
+
 static int um_vec2_poll_finish(struct napi_struct *napi, int budget,
+			       struct um_vec2_channel *channel,
 			       int rx_done, int tx_done, bool tx_more)
 {
 	/*
@@ -363,6 +378,11 @@ static int um_vec2_poll_finish(struct napi_struct *napi, int budget,
 	 */
 	if (rx_done > 0 || (tx_more && tx_done > 0))
 		napi_schedule(napi);
+	else if (tx_more && !tx_done && channel->tx_retry_timer_setup)
+		mod_timer(&channel->tx_retry_timer, jiffies + 1);
+
+	if (channel->tx_retry_timer_setup && (!tx_more || tx_done != 0))
+		timer_delete(&channel->tx_retry_timer);
 	if (rx_done < budget)
 		napi_complete_done(napi, rx_done);
 	return rx_done;
@@ -419,7 +439,8 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 		rx_done = 0;
 
 complete:
-	return um_vec2_poll_finish(napi, budget, rx_done, tx_done, tx_more);
+	return um_vec2_poll_finish(napi, budget, channel, rx_done, tx_done,
+				   tx_more);
 
 backend_dead:
 	return um_vec2_poll_backend_dead(napi, budget, dev, rx_done);
@@ -443,39 +464,6 @@ static irqreturn_t um_vec2_rx_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static bool um_vec2_channel_tx_pending(struct um_vec2_channel *channel)
-{
-	struct um_vec2_queue_pair *queue = channel->queue;
-	bool pending;
-
-	if (!queue)
-		return false;
-
-	spin_lock(&queue->tx_lock);
-	pending = !um_vec2_tx_ring_empty(&queue->tx);
-	spin_unlock(&queue->tx_lock);
-	return pending;
-}
-
-static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
-{
-	struct um_vec2_channel *channel = dev_id;
-	struct um_vec2_dev *vdev;
-	struct net_device *dev;
-
-	if (!channel)
-		return IRQ_NONE;
-	vdev = channel->vdev;
-	dev = vdev->netdev;
-	if (!dev || !channel->napi_enabled || !netif_running(dev))
-		return IRQ_NONE;
-	if (!um_vec2_channel_tx_pending(channel))
-		return IRQ_HANDLED;
-	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_IRQS);
-	napi_schedule(&channel->napi);
-	return IRQ_HANDLED;
-}
-
 static int um_vec2_start_channel_irqs(struct net_device *dev,
 				      struct um_vec2_channel *channel,
 				      unsigned int index)
@@ -495,13 +483,6 @@ static int um_vec2_start_channel_irqs(struct net_device *dev,
 	if (!index)
 		dev->irq = ret;
 
-	ret = um_request_irq(UM_IRQ_ALLOC, channel->tx_fd, IRQ_WRITE,
-			     um_vec2_tx_interrupt, IRQF_SHARED, dev->name,
-			     channel);
-	if (ret < 0)
-		return ret;
-
-	channel->tx_irq = ret;
 	return 0;
 }
 
@@ -518,6 +499,8 @@ static int um_vec2_start_channel(struct net_device *dev,
 	netif_napi_add_weight(dev, &channel->napi, um_vec2_netdev_poll,
 			      um_vec2_napi_weight(vdev));
 	channel->napi_added = true;
+	timer_setup(&channel->tx_retry_timer, um_vec2_tx_retry_timer, 0);
+	channel->tx_retry_timer_setup = true;
 
 	ret = um_vec2_start_channel_irqs(dev, channel, index);
 	if (ret < 0)
@@ -578,6 +561,10 @@ static void um_vec2_stop_datapath(struct net_device *dev,
 		if (channel->napi_enabled) {
 			napi_disable(&channel->napi);
 			channel->napi_enabled = false;
+		}
+		if (channel->tx_retry_timer_setup) {
+			timer_delete_sync(&channel->tx_retry_timer);
+			channel->tx_retry_timer_setup = false;
 		}
 		WRITE_ONCE(channel->rx_pending, false);
 		if (channel->rx_irq != UM_VEC2_NO_IRQ) {

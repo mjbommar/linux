@@ -365,6 +365,20 @@ vector2_netdev_poll_channel(struct vector2_netdev_poll_ctx *ctx)
 	return &ctx->vdev->channels[0];
 }
 
+static void vector2_netdev_open_uses_rx_irq_only_test(struct kunit *test)
+{
+	struct vector2_netdev_poll_ctx *ctx =
+		vector2_netdev_poll_ctx_open(test, 39);
+	struct um_vec2_channel *channel = vector2_netdev_poll_channel(ctx);
+
+	KUNIT_EXPECT_NE(test, channel->rx_irq, UM_VEC2_NO_IRQ);
+	KUNIT_EXPECT_EQ(test, channel->tx_irq, UM_VEC2_NO_IRQ);
+	KUNIT_EXPECT_TRUE(test, channel->tx_retry_timer_setup);
+	KUNIT_EXPECT_FALSE(test, timer_pending(&channel->tx_retry_timer));
+
+	vector2_netdev_poll_ctx_close(ctx);
+}
+
 static int vector2_netdev_poll_invoke(struct vector2_netdev_poll_ctx *ctx,
 				      int budget)
 {
@@ -571,6 +585,7 @@ static void vector2_netdev_poll_tx_more_reschedules_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, channel->queue->tx.count, 1U);
 	KUNIT_EXPECT_TRUE(test, test_bit(NAPI_STATE_SCHED,
 					 &channel->napi.state));
+	KUNIT_EXPECT_FALSE(test, timer_pending(&channel->tx_retry_timer));
 
 	/* Drain the rest so ctx_close has nothing pending. */
 	um_vec2_fake_host_set_tx_limit(&ctx->fake, UINT_MAX);
@@ -578,6 +593,42 @@ static void vector2_netdev_poll_tx_more_reschedules_test(struct kunit *test)
 	rx_done = vector2_netdev_poll_invoke(ctx, 4);
 	KUNIT_EXPECT_EQ(test, rx_done, 0);
 	KUNIT_EXPECT_TRUE(test, um_vec2_tx_ring_empty(&channel->queue->tx));
+
+	vector2_netdev_poll_ctx_close(ctx);
+}
+
+static void
+vector2_netdev_poll_tx_stall_arms_retry_timer_test(struct kunit *test)
+{
+	struct vector2_netdev_poll_ctx *ctx =
+		vector2_netdev_poll_ctx_open(test, 40);
+	struct um_vec2_channel *channel = vector2_netdev_poll_channel(ctx);
+	struct sk_buff *skb;
+	int rx_done;
+
+	skb = alloc_skb(64, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	skb_put(skb, 64);
+	KUNIT_ASSERT_EQ(test,
+			um_vec2_tx_ring_enqueue(&channel->queue->tx, skb,
+						skb->len), 0);
+	um_vec2_fake_host_set_tx_limit(&ctx->fake, 0);
+
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+
+	KUNIT_EXPECT_EQ(test, rx_done, 0);
+	KUNIT_EXPECT_EQ(test, channel->queue->tx.count, 1U);
+	KUNIT_EXPECT_FALSE(test, test_bit(NAPI_STATE_SCHED,
+					  &channel->napi.state));
+	KUNIT_EXPECT_TRUE(test, timer_pending(&channel->tx_retry_timer));
+
+	timer_delete_sync(&channel->tx_retry_timer);
+	um_vec2_fake_host_set_tx_limit(&ctx->fake, UINT_MAX);
+	clear_bit(NAPI_STATE_SCHED, &channel->napi.state);
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+	KUNIT_EXPECT_EQ(test, rx_done, 0);
+	KUNIT_EXPECT_TRUE(test, um_vec2_tx_ring_empty(&channel->queue->tx));
+	KUNIT_EXPECT_FALSE(test, timer_pending(&channel->tx_retry_timer));
 
 	vector2_netdev_poll_ctx_close(ctx);
 }
@@ -639,11 +690,13 @@ static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_checksum_features_follow_config_test),
 	KUNIT_CASE(vector2_netdev_rx_frame_len_follows_channel_test),
 	KUNIT_CASE(vector2_netdev_queue_cpu_policy_test),
+	KUNIT_CASE(vector2_netdev_open_uses_rx_irq_only_test),
 	KUNIT_CASE(vector2_netdev_poll_healthy_round_test),
 	KUNIT_CASE(vector2_netdev_poll_rx_progress_repolls_test),
 	KUNIT_CASE(vector2_netdev_poll_backend_dead_tx_test),
 	KUNIT_CASE(vector2_netdev_poll_backend_dead_rx_test),
 	KUNIT_CASE(vector2_netdev_poll_tx_more_reschedules_test),
+	KUNIT_CASE(vector2_netdev_poll_tx_stall_arms_retry_timer_test),
 	KUNIT_CASE(vector2_netdev_poll_rx_alloc_error_test),
 	KUNIT_CASE(vector2_netdev_poll_rx_eproto_test),
 	{}
