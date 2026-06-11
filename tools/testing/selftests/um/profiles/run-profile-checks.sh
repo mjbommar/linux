@@ -178,7 +178,7 @@ run_one prod-fast \
 	|| any_fail=1
 
 # prod-with-hooks: Layer 2 debugfs surface + tracefs mountable; no
-# kcov (that's fuzz/research).
+# KCOV (that's fuzz/fuzz-deep).
 run_one prod-with-hooks \
 	debugfs_um=PRESENT \
 	debugfs_um_hooks=PRESENT \
@@ -188,10 +188,11 @@ run_one prod-with-hooks \
 	proc_sysrq=PRESENT \
 	|| any_fail=1
 
-# research: everything on.
+# research: full debug/trace/sanitizer surface; KCOV is intentionally
+# off here because it is validated by fuzz/fuzz-deep.
 run_one research \
 	debugfs_um=PRESENT \
-	debugfs_kcov=PRESENT \
+	debugfs_kcov=ABSENT \
 	debugfs_kfence=PRESENT \
 	tracefs=PRESENT \
 	tracefs_syscalls=PRESENT \

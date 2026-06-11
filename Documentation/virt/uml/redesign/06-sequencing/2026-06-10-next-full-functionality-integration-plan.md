@@ -1044,8 +1044,21 @@ Acceptance gates:
   `bpf-jit-smoke` against a fresh research-profile UML binary:
   `bpf_jit_enable=1`, minimal `BPF_PROG_TYPE_SOCKET_FILTER` load succeeds,
   and `BPF_OBJ_GET_INFO_BY_FD` reports `xlated_len=16` and `jited_len=16`.
-- KASAN/KFENCE/KCSAN/KCOV runtime smoke matrix. Current status: open; each
-  needs a matching profile binary and module/runtime/guest-tool prerequisites.
+- KASAN runtime smoke. Current status: PASS on 2026-06-10 through
+  `cve-repro` against a fresh research-profile UML binary plus
+  `mm/kasan/kasan_test.ko`: `ok=10`, `not_ok=0`, `kasan_bugs=13`,
+  `guest_wall_s=0`, and `host_wall=2.71s`.
+- KFENCE runtime smoke. Current status: partial; the research runtime profile
+  probe confirms `debugfs_kfence=PRESENT`, but a focused KFENCE report smoke
+  is still required before final completion.
+- KCSAN runtime smoke. Current status: open; build and boot the `race`
+  profile with `ncpus=2`, validate `debugfs_kcsan`, and capture selftest
+  evidence.
+- KCOV runtime smoke. Current status: open; build and boot `fuzz` or
+  `fuzz-deep` and run a focused `/sys/kernel/debug/kcov` mmap/ioctl smoke.
+- Profile harness alignment. Current status: fixed for `research`, which now
+  expects `debugfs_kcov=ABSENT` because KCOV is intentionally isolated to
+  fuzzing profiles.
 - Documentation table with pass/fail/skip and rationale. Current status:
   partially updated in the live inventory; final docs matrix remains open.
 

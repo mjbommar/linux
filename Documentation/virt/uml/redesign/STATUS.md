@@ -389,9 +389,13 @@ Current instrumentation evidence:
   `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`, and
   `CONFIG_BPF_JIT_ALWAYS_ON=y`, `arch/x86/net/bpf_jit_comp.o` builds, and
   `bpf-jit-smoke` passes on a fresh research-profile UML binary with
-  `bpf_jit_enable=1`, `xlated_len=16`, and `jited_len=16`; and
-- KMSAN and KASAN/KFENCE/KCSAN/KCOV still require the matching profile
-  binaries/modules and guest tooling for runtime closure.
+  `bpf_jit_enable=1`, `xlated_len=16`, and `jited_len=16`;
+- KASAN is runtime-validated for the research profile: a fresh
+  research-profile UML binary plus `mm/kasan/kasan_test.ko` passes
+  `cve-repro` with `ok=10`, `not_ok=0`, `kasan_bugs=13`,
+  `guest_wall_s=0`, and `host_wall=2.71s`; and
+- KMSAN, KFENCE report generation, KCSAN, and KCOV still require the
+  matching profile binaries/modules and guest tooling for runtime closure.
 
 ## Historical-Only Work
 
