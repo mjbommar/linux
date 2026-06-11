@@ -682,8 +682,13 @@ Current `next` checkpoint:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
   fail-closed policy, validation command, and non-goals.
-- Still open: raw time/RDTSC/signal determinism, broader deterministic workload
-  coverage, and replayable device/network/hostfs event policy.
+- Validation on 2026-06-11 after the live raw-time strict-replay smoke:
+  `kvm-record-smoke` PASS includes `live-time=1`, proving replay-mode
+  `clock_gettime(2)` is rejected by strict replay instead of observing host
+  time outside the log.
+- Still open: replayable raw-time payloads, direct RDTSC/RDTSCP runtime
+  evidence, signal determinism, broader deterministic workload coverage, and
+  replayable device/network/hostfs event policy.
 
 Acceptance gates:
 
@@ -694,6 +699,8 @@ Acceptance gates:
 - Buffer overflow behavior test. Current status: covered by KUnit.
 - Strict supported-entry mismatch smoke. Current status: PASS through the live
   `kvm-record-mismatch` helper.
+- Strict raw-time syscall smoke. Current status: PASS through the live
+  `kvm-record-time` helper.
 - Gadget-on and gadget-off comparison. Current status: state-page bypass and
   gadget-on hot path are covered, and record/replay now forces gadget-handled
   syscalls through the live dispatcher; side-by-side gadget-on/off workload

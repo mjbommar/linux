@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -71,12 +71,15 @@ Current source-tree direction:
   unrecorded in-guest `EINTR` points. Strict replay also rejects randomness
   and external I/O syscalls outside the supported subset, including
   `getrandom`, `openat`, `read`, `write`, and `ioctl`, instead of replaying
-  them as scalar-only entries. A live supported-syscall mismatch smoke now
-  records `getcwd(2)` with one payload-size argument and verifies strict replay
-  kills the guest when replay sees the same syscall with a different
-  payload-size argument. `Documentation/virt/uml/kvm-v2-record-replay.rst`
-  documents the supported experimental determinism tier and current non-goals.
-  Broader payload coverage, replayable signal-event ordering,
+  them as scalar-only entries. The live raw-time smoke now proves an actual
+  replay-mode `clock_gettime(2)` syscall is rejected by strict replay instead
+  of observing host time outside the log. A live supported-syscall mismatch
+  smoke now records `getcwd(2)` with one payload-size argument and verifies
+  strict replay kills the guest when replay sees the same syscall with a
+  different payload-size argument.
+  `Documentation/virt/uml/kvm-v2-record-replay.rst` documents the supported
+  experimental determinism tier and current non-goals. Broader payload
+  coverage, replayable signal-event ordering,
   device/network/hostfs event replay, and full deterministic replay policy
   remain incomplete.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
@@ -198,6 +201,12 @@ The strongest current KVM v2 evidence is:
   the expected init-killing SIGSEGV as PASS only when the kernel logs strict
   replay divergence for the supported syscall (`nr=79` on the validated x86_64
   run).
+- Experimental strict raw-time smoke: the static `kvm-record-time` helper arms
+  strict replay with an empty log and issues raw `clock_gettime(2)` through the
+  syscall path. The host runner treats the expected init-killing SIGSEGV as
+  PASS only when the kernel logs strict unsupported-syscall rejection (`nr=228`
+  on the validated x86_64 run), proving replay does not silently read host time
+  outside the log.
 - Public record/replay determinism-tier documentation:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
@@ -705,10 +714,13 @@ subset are also fail-closed in strict replay. The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
 `uname(2)`/`getcwd(2)` payload workload, and the mismatch smoke proves that a
 supported `getcwd(2)` replay entry with different payload-size arguments kills
-the guest instead of falling back. Replayable raw-time payloads, explicit
-signal-event ordering, and replayable device/network/hostfs events remain
-open. The public `kvm-v2-record-replay.rst` page now documents the supported
-experimental replay tier and validation path.
+the guest instead of falling back. The raw-time smoke proves live
+`clock_gettime(2)` is rejected by strict replay rather than observing host
+time outside the log. Replayable raw-time payloads, direct `RDTSC`/`RDTSCP`
+runtime evidence, explicit signal-event ordering, and replayable
+device/network/hostfs events remain open. The public
+`kvm-v2-record-replay.rst` page now documents the supported experimental
+replay tier and validation path.
 
 The historical private state-trace implementation remains reference material
 only. Current `next` replaces it with a clean optional diagnostic ring rather

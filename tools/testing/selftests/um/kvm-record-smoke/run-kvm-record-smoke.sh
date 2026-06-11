@@ -8,8 +8,8 @@
 # control surface and verifies that a real KVM v2 workload records syscall
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
-# verify strict replay kills both mismatched and unsupported live syscalls
-# instead of falling back.
+# verify strict replay kills mismatched, raw-time, and unsupported live
+# syscalls instead of falling back.
 
 set -u
 
@@ -20,6 +20,7 @@ GUEST_SCRIPT="$DIR/kvm-record-smoke.sh"
 TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
+TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -39,6 +40,10 @@ if [ ! -x "$NEGATIVE_HELPER" ]; then
 fi
 if [ ! -x "$MISMATCH_HELPER" ]; then
 	echo "SKIP: $MISMATCH_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$TIME_HELPER" ]; then
+	echo "SKIP: $TIME_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
@@ -245,6 +250,58 @@ if echo "$MISMATCH_OUT" | grep -q 'KVM_RECORD_MISMATCH: FAIL'; then
 fi
 
 if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before raw-time smoke" >&2
+	exit 4
+fi
+
+TIME_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$TIME_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+TIME_LINE=$(echo "$TIME_OUT" | grep '^KVM_RECORD_TIME:' | head -1)
+if [ -z "$TIME_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no raw-time smoke result line)"
+	echo "$TIME_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$TIME_LINE"
+case "$TIME_LINE" in
+*armed\ syscall=*) ;;
+*)
+	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper did not arm)"
+	echo "$TIME_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
+		tail -80
+	exit 1
+	;;
+esac
+
+TIME_NR=$(echo "$TIME_LINE" |
+	sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
+if [ -z "$TIME_NR" ] ||
+   ! echo "$TIME_OUT" |
+	grep -q "kvm-v2 record: strict replay unsupported nr=$TIME_NR"; then
+	echo "KVM_RECORD_SMOKE: FAIL (raw-time strict rejection missing)"
+	echo "$TIME_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+if echo "$TIME_OUT" | grep -q 'KVM_RECORD_TIME: FAIL'; then
+	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper returned from unsupported syscall)"
+	echo "$TIME_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable before negative smoke" >&2
 	exit 4
 fi
@@ -297,6 +354,7 @@ if echo "$NEGATIVE_OUT" | grep -q 'KVM_RECORD_NEGATIVE: FAIL'; then
 fi
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
-SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1 live-negative=1)"
+SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
+SUMMARY="$SUMMARY live-time=1 live-negative=1)"
 echo "$SUMMARY"
 exit 0
