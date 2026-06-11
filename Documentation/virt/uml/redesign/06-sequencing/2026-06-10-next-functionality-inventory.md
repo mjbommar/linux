@@ -129,7 +129,7 @@ This file is the live execution tracker for
 | Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. KVM FPU isolation reproducers are now explicitly diagnostic-only and outside the UML kselftest pass/fail gate. | Continue archival grep for diary/internal labels in broader historical repro material. |
 | Docs | `STATUS.md` | Present-current | `next` | Update after every landed workstream. | status review updated with launcher/selftest curation boundary, 2026-06-10. |
 | Docs | old reports/presentations | Archived-historical | `next`, historical docs | Keep the May 2026 report/deck workspace as explicitly historical unless a future report refresh freezes a new `next` cutoff and regenerates the data, TeX, and PDFs from the live inventory. | `report-presentation/README.md` and `PLAN.md` mark the workspace archival; shared TeX/report/slides/comprehensive sources carry archive notices; `status_kpis.csv` is marked historical; tracked report, slides, and comprehensive PDFs rebuild with `make all`, 2026-06-10. |
-| Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
+| Docs | snapshot ELF docs | Present-validated | `next`, `kvm-v2-snapshot-elf64` | Keep `snapshot-elf-format.rst` and `debugfs.rst` matched to the current boot, mconsole/`umlctl`, debugfs, and in-kernel exporter surfaces. | Trigger/symbol audit confirms `kvm_v2_snapshot_elf_export=`, mconsole `snapshot_export`, debugfs `kvm_v2_snapshot_elf_export_path`, debugfs `kvm_v2_snapshot_bench`, `kvm_v2_snapshot_elf_export_to_file()`, `kvm_v2_snapshot_elf_export_to_fd()`, and `snapshot-elf-roundtrip`; docs updated and `umlctl` help corrected, 2026-06-10. |
 | Docs | active UML user docs | Present-cleaned | `next` | Keep non-redesign UML docs focused on current interfaces and limitations, not workstream history. | Normalized ftrace, kprobes, KMSAN, debugfs, section-split, snapshot/forkserver, launcher, APERF/MPERF, and profile docs; focused scan over non-redesign `Documentation/virt/uml/*.rst` now has no standalone workstream/decision/memo/phase-history labels apart from an OpenWrt sample `#0` line, 2026-06-10. |
 | Docs | vector2 validation docs | Present-needs-update | `next` | Align with final gates. | docs audit. |
 | Upstream | patch queue | Present-stale | `next` docs | Regenerate from final `next`. | checkpatch and cover letters. |
@@ -184,6 +184,10 @@ This file is the live execution tracker for
   phase-history, or future-phase labels as current user-facing explanation.
   The focused scan exception is a real OpenWrt sample kernel version line
   containing `#0`.
+- Snapshot ELF documentation now matches the current producer surfaces:
+  `kvm_v2_snapshot_elf_export=`, mconsole `snapshot_export`, direct debugfs
+  `kvm_v2_snapshot_elf_export_path`, debugfs `kvm_v2_snapshot_bench`, and the
+  in-kernel ELF export helpers.
 
 ## Remaining Hard Blockers
 

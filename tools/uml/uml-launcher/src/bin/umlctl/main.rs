@@ -233,8 +233,8 @@ enum Cmd {
     PortForward(port_forward::PortForwardArgs),
     /// Snapshot of a running UML guest's KVM-v2 state.
     ///
-    /// Today: `export` triggers an ELF64-core dump via debugfs and
-    /// writes it to a host path the user provides.
+    /// Today: `export` asks the kernel mconsole `snapshot_export`
+    /// command to write an ELF64-core dump to a host path the user provides.
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
 }

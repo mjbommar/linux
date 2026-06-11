@@ -25,6 +25,8 @@ Layout
   │   ├── kfence_sample         (rw, 0600)  0|1
   │   ├── record_replay         (rw, 0600)  0|1
   │   └── perf_dispatch         (rw, 0600)  0|1
+  ├── kvm_v2_snapshot_bench (wo, 0200)  KVM v2 snapshot benchmark trigger
+  ├── kvm_v2_snapshot_elf_export_path (wo, 0200)  KVM v2 snapshot ELF export
   ├── kvm_v2_record_ctl     (wo, 0200)  experimental KVM v2 record control
   ├── kvm_v2_record_status  (ro, 0400)  experimental KVM v2 record counters
   └── stats              (ro, 0400)  per-hook on-state + hit counter
@@ -97,6 +99,28 @@ cumulative hit count since boot. Example on an idle system with
   kfence_sample        on=0 hits=0
   record_replay        on=0 hits=0
   perf_dispatch        on=0 hits=0
+
+KVM v2 snapshot controls
+========================
+
+When ``CONFIG_UM_BACKEND_KVM_V2=y`` and ``CONFIG_DEBUG_FS=y``, the KVM v2
+backend also exposes validation-oriented snapshot controls:
+
+``kvm_v2_snapshot_bench``
+    Write-only benchmark trigger. Write a positive integer iteration count to
+    run repeated KVM v2 capture/restore cycles against the current task state,
+    using the same benchmark engine as the ``kvm_v2_snapshot_bench=<n>``
+    command-line option. The value is bounded by the kernel implementation and
+    returns ``-EINVAL`` for malformed or out-of-range input. This file is for
+    validation and development, not a stable workload-management interface.
+
+``kvm_v2_snapshot_elf_export_path``
+    Write-only ELF64-core export trigger. Write an inside-guest path to capture
+    a fresh KVM v2 snapshot and synchronously write the snapshot ELF file. This
+    is useful for guest scripts and self-contained validation. For host-driven
+    live exports, prefer ``umlctl snapshot export <instance> --output <path>``,
+    which sends mconsole ``snapshot_export <host-path>`` and avoids guest-path
+    ambiguity.
 
 KVM v2 record controls
 ======================

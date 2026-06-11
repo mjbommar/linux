@@ -1134,6 +1134,10 @@ Current state:
   source, slide source, comprehensive report source, and `status_kpis.csv`.
   The tracked report, slide, and comprehensive PDFs were rebuilt from those
   sources with `make all`.
+- Snapshot ELF/debugfs docs now match current `next`: the format doc is marked
+  validated, `debugfs.rst` lists the KVM v2 snapshot bench/export files, and
+  `umlctl snapshot export` help names mconsole `snapshot_export` instead of
+  debugfs.
 - Remaining documentation cleanup is now the broader redesign archive side:
   old research notes must either stay clearly historical or be refreshed from
   final `next` if they become user-facing evidence again.

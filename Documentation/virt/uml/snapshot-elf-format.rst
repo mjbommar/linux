@@ -5,8 +5,9 @@ UML kvm-v2 snapshot ELF64-core on-disk format
 ================================================
 
 :Author: UML kvm-v2 maintainers
-:Status: v1, version-tagged for forward evolution; current ``next``
-         validation is pending.
+:Status: v1, version-tagged for forward evolution; validated on current
+         ``next`` by KUnit, boot-export, mconsole/``umlctl``, and
+         readelf/gdb roundtrip coverage.
 
 This document specifies the on-disk layout of the ELF64 core file
 produced by ``kvm_v2_snapshot_elf_export_to_file()``.  The format is
@@ -208,7 +209,7 @@ From the operator side:
   once during late init.  This is mainly for selftests and automation that need
   a host-visible ELF before guest userspace is available.
 
-* Direct debugfs write (for inside-the-guest scripts)::
+* Direct debugfs write (for inside-the-guest scripts and validation)::
 
     echo /path/to/dump.elf > /sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path
 
@@ -216,15 +217,19 @@ From the operator side:
   ``kvm_v2_snapshot_elf_export_to_fd()`` (declared in
   ``arch/um/backend/kvm-v2/kvm_v2_backend.h``).
 
-Validation requirements
-=======================
+Current validation
+==================
 
-Before this format is marked complete on ``next``, validate a freshly exported
-dump with:
+The current ``next`` tree validates the format and producer surfaces with:
 
-* ``readelf -h dump.elf``
-* ``readelf -l dump.elf``
-* ``readelf -n dump.elf``
-* ``gdb -c dump.elf``
-* ``gdb -ex 'source tools/uml/uml-gdb/uml-snapshot.py' -c dump.elf``
+* ``um_kvm_v2_snapshot`` KUnit, including
+  ``test_kvm_v2_snapshot_elf_regs_only``.
 * ``tools/testing/selftests/um/snapshot-elf-roundtrip/run-snapshot-elf-roundtrip.sh``
+  boot export through ``kvm_v2_snapshot_elf_export=<host-path>``, followed by
+  ``readelf -h/-l/-n`` checks and optional ``gdb`` plus
+  ``tools/uml/uml-gdb/uml-snapshot.py`` register inspection.
+* ``umlctl snapshot export <instance> --output <path>`` over mconsole
+  ``snapshot_export <path>`` for host-driven live exports.
+
+Any incompatible on-disk layout change must update the private note version and
+keep these gates current.

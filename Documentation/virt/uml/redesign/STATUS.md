@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, and snapshot ELF/debugfs documentation validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -44,6 +44,10 @@ Current source-tree direction:
 - KVM v2 snapshot KUnit, live `umlctl snapshot export`, and snapshot restore
   smoke validation pass on `next`; SMP snapshot semantics are explicitly
   gated to one online CPU.
+- Snapshot ELF/debugfs documentation now matches the current producer
+  surfaces: boot-time `kvm_v2_snapshot_elf_export=`, mconsole/`umlctl
+  snapshot export`, direct debugfs `kvm_v2_snapshot_elf_export_path`, debugfs
+  `kvm_v2_snapshot_bench`, and the in-kernel ELF export helpers.
 - KVM v2 record/replay has an experimental core on `next` behind
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; its live syscall
   dispatcher hook can observe and replay syscall return values, and debugfs can
