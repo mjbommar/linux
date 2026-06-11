@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# L0: launcher unit-test gate.
+# Launcher unit-test gate.
 #
 # `cargo test --bin umlctl` runs every test in the umlctl crate.
 # This is the cheapest gate (~5 sec on a warm cache) and catches
@@ -15,7 +15,7 @@ schema_version = 1
 [gate]
 name = "launcher-cargo"
 description = "umlctl host-side unit tests (cargo test --bin umlctl)"
-phase = "L0"
+phase = "host-tools"
 
 [run]
 cmd = "cargo test --manifest-path tools/uml/uml-launcher/Cargo.toml --bin umlctl"

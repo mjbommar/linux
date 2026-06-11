@@ -42,14 +42,14 @@ def test_httpx() -> None:
 
 	req = httpx.Request("POST",
 			    "http://example.com/api/v1/x?q=1",
-			    headers={"X-Test": "phaseJ"},
+			    headers={"X-Test": "uml-smoke"},
 			    json={"k": "v", "n": [1, 2, 3]})
 	assert req.method == "POST"
 	assert str(req.url) == "http://example.com/api/v1/x?q=1"
 	# httpx serializes JSON compact (no spaces between separators).
 	assert req.content == b'{"k":"v","n":[1,2,3]}'
 	assert req.headers["Content-Type"] == "application/json"
-	assert req.headers["X-Test"] == "phaseJ"
+	assert req.headers["X-Test"] == "uml-smoke"
 	print("OK: httpx version=%s" % httpx.__version__)
 
 

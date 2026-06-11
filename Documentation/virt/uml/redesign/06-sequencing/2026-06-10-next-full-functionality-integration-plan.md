@@ -997,6 +997,23 @@ Acceptance gates:
 - No test silently passes because a required kernel feature is absent.
 - Expected failure lists are current and justified.
 
+Current state:
+
+- A focused 2026-06-10 cleanup removed planning document tags and phase labels
+  from active launcher metadata, sandbox/research launcher examples, SELinux
+  policy headers, gate metadata, and tier smoke fixture values.
+- Gate `phase` values now use semantic groups such as `host-tools`, `build`,
+  `substrate`, `python`, and `performance` instead of chronology labels.
+- Validation passed with `cargo fmt --check`, `cargo test`, `python3 -m
+  py_compile` for touched tier smoke scripts, `umlctl gate list --source-root
+  .`, `umlctl gate run --dry-run` for all gate TOMLs, `uml-launcher run
+  --dry-run --config` for touched legacy launcher examples, and
+  `git diff --check`.
+- A focused scan over `arch/um`, `tools/testing/selftests/um`, and
+  `tools/uml/uml-launcher` now reports no standalone workstream, decision,
+  memo, or phase-label patterns after excluding operational post-mortem
+  wording and archived redesign material.
+
 ## Workstream K: Documentation And Reports
 
 Purpose:
@@ -1021,6 +1038,16 @@ Acceptance gates:
   clean or intentionally archived.
 - `git diff --check torvalds/master...next` is clean, except for explicitly
   archived patch artifacts if kept.
+
+Current state:
+
+- The launcher examples README and the `launcher`, `sandbox`, and `research`
+  user-facing docs no longer describe those paths in workstream/future-v2
+  terms.
+- A focused scan excluding `Documentation/virt/uml/redesign/**` still finds
+  planning/history references in active UML docs including ftrace, kprobes,
+  KMSAN, debugfs, section-split, snapshot, and several profile pages. Those
+  need a dedicated normalization pass rather than piecemeal edits.
 
 ## Workstream L: Upstream Series Readiness
 

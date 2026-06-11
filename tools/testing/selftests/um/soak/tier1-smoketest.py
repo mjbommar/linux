@@ -31,13 +31,13 @@ def test_requests() -> bool:
 
 	pr = PreparedRequest()
 	pr.prepare(method="POST", url="http://example.com/api/v1/x?q=1",
-		   headers={"X-Test": "phaseJ"},
+		   headers={"X-Test": "uml-smoke"},
 		   json={"k": "v", "n": [1, 2, 3]})
 	assert pr.method == "POST"
 	assert pr.url == "http://example.com/api/v1/x?q=1"
 	assert pr.body == b'{"k": "v", "n": [1, 2, 3]}'
 	assert pr.headers["Content-Type"] == "application/json"
-	assert pr.headers["X-Test"] == "phaseJ"
+	assert pr.headers["X-Test"] == "uml-smoke"
 	# Also exercise URL-rebuild path.
 	from requests.utils import urlparse, urlunparse
 	parts = urlparse(pr.url)

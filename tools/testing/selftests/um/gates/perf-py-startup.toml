@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# L5: minimal Python startup wall-clock, kvm-v2 vs seccomp.
+# Minimal Python startup wall-clock, kvm-v2 vs seccomp.
 #
 # Wraps run-perf-py-startup.sh, which runs N samples per backend,
 # computes medians, and emits a SUMMARY line in the same shape as
@@ -18,7 +18,7 @@ schema_version = 1
 [gate]
 name = "perf-py-startup"
 description = "Minimal Python startup ratio kvm-v2:seccomp (printk-timestamp)"
-phase = "H.1"
+phase = "performance"
 
 [run]
 cmd = "bash tools/testing/selftests/um/perf-py-startup/run-perf-py-startup.sh"

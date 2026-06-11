@@ -14,11 +14,9 @@ categories = ["command-line-utilities", "virtualization"]
 name = "uml-launcher"
 path = "src/main.rs"
 
-# umlctl — multi-instance lifecycle CLI (parking-lot
-# 08-future-phases/05-umlctl.md v1). Shares the launcher
-# crate's deps (clap, figment, serde, shared_child,
-# signal-hook, tracing, anyhow, nix, libc) so there's no
-# dependency-tree bloat. See src/bin/umlctl.rs.
+# umlctl — multi-instance lifecycle CLI. Shares the launcher
+# crate's deps so there's no dependency-tree bloat.
+# See src/bin/umlctl.rs.
 [[bin]]
 name = "umlctl"
 path = "src/bin/umlctl/main.rs"
@@ -67,7 +65,7 @@ hex = "0.4"
 # default features only; no full-shell-syntax expansion.
 shellexpand = { version = "3", default-features = false, features = ["base-0"] }
 
-# --- C-10 v2: vhost-user backend stack (rust-vmm) ----------------
+# --- vhost-user backend stack (rust-vmm) -------------------------
 # vhost-user-backend 0.22 pins vm-memory = "=0.17.1" exactly; match
 # it with `=` so cargo resolves to the exact version the backend
 # crate was tested against rather than a newer vm-memory that

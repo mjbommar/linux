@@ -5,10 +5,9 @@
 # built with tight Kconfig but the host attack surface is the
 # same as any UML process.
 #
-# The sandbox isolation story (per-device vhost-user helpers
-# with seccomp filters + AppArmor profiles) is C-10 v2 work.
-# Once v2 lands this config will grow device-helper sections;
-# today it's just the launch knobs.
+# Per-device vhost-user helpers, seccomp filters, and LSM policy
+# provide the host isolation boundary. This example keeps only the
+# launch knobs; helper-specific settings live in backend configs.
 #
 # Pair with:
 #   make ARCH=um uml/sandbox

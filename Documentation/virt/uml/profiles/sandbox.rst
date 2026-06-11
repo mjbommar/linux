@@ -28,17 +28,16 @@ Build
 Run
 ===
 
-Invoke via ``uml-launcher`` (workstream C-10). v1 runs the
-sandbox-profile kernel under a single launcher process; v2 adds
-per-device vhost-user helpers with seccomp filters for real
-host-side isolation. Example config at
+Invoke via ``uml-launcher``. The sandbox-profile kernel can run
+under the base launcher, with stronger host-side isolation provided
+by per-device vhost-user helpers and seccomp filters. Example config at
 ``tools/uml/uml-launcher/examples/sandbox.toml``::
 
    uml-launcher run \\
        --config tools/uml/uml-launcher/examples/sandbox.toml
 
 See ``Documentation/virt/uml/launcher.rst`` for the launcher
-surface and the v2 roadmap.
+surface.
 
 What's on
 =========
@@ -64,11 +63,9 @@ What's off
 What this profile is NOT
 ========================
 
-- **Not a container runtime.** See the discussion in
-  ``Documentation/virt/uml/redesign/08-future-phases/01-end-user-ideal-world.md``
-  §"Tightened container-runtime boundary". A launcher around
-  sandbox can provide operational containment (process limits,
-  cgroups, host-side seccomp); UML itself is the guest kernel.
+- **Not a container runtime.** A launcher around sandbox can
+  provide operational containment (process limits, cgroups,
+  host-side seccomp); UML itself is the guest kernel.
 - **Not a hardened kernel.** Sandbox is about minimal TCB, not
   about kernel self-hardening. Grsecurity/KSPP features are
   orthogonal and not bundled here.

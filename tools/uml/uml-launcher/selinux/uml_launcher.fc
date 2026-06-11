@@ -1,6 +1,6 @@
 ## SPDX-License-Identifier: GPL-2.0
 ##
-## File-context rules for uml-launcher (C-10 v2).
+## File-context rules for uml-launcher.
 ##
 ## Paths: the upstream install paths match the `@{exec_path}`
 ## list in the AppArmor profile (/usr/bin and /usr/local/bin).

@@ -37,7 +37,7 @@ CLI flags > TOML > env vars > defaults.
 |---|---|---|
 | [`fuzz.toml`](fuzz.toml) | fuzz | External AFL++/syzkaller harness binding via `--forkserver` |
 | [`research.toml`](research.toml) | research | Interactive debugging / feature exploration |
-| [`sandbox.toml`](sandbox.toml) | sandbox | Future v2 shape — v1 just runs it unsandboxed |
+| [`sandbox.toml`](sandbox.toml) | sandbox | Sandbox-profile launch knobs |
 | [`dev.toml`](dev.toml) | any | Fast boot + interactive shell; developer daily driver |
 
 ### `umlctl up` Umlfile configs

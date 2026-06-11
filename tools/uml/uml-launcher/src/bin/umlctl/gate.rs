@@ -43,8 +43,8 @@ pub struct GateMeta {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// Optional phase tag (e.g. "E.4"). Informational; lets `gate
-    /// diff` group by phase.
+    /// Optional group tag such as "performance". Informational;
+    /// lets `gate diff` group related gates.
     #[serde(default)]
     pub phase: String,
 }

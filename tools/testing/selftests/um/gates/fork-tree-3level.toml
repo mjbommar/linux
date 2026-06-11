@@ -16,7 +16,7 @@ schema_version = 1
 [gate]
 name = "fork-tree-3level"
 description = "3-level fork tree with middle wait - minimal repro for v2 fork-state-leak family"
-phase = "E.4"
+phase = "substrate"
 
 [run]
 cmd = "bash tools/testing/selftests/um/fork-tree-3level/run-fork-tree-3level.sh"

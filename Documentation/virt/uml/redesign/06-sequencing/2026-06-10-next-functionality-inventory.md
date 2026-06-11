@@ -122,12 +122,13 @@ This file is the live execution tracker for
 | Instrumentation | KASAN/KCSAN/KFENCE/KCOV | Partial/needs-validation | `next`, docs | Verify each profile and document gaps. | instrumentation matrix. |
 | Instrumentation | BPF/JIT shims | Present-needs-validation | `next` | Keep if tests pass and docs are accurate. | BPF smoke if available. |
 | Instrumentation | KGDB | Needs-decision | original plan/docs | Implement, document absent, or retire with approval. | KGDB smoke if kept. |
-| Selftests | Upstreamable smoke/regression tests | Partial | all branches | Curate comments and prerequisites. | selftest target list. |
+| Selftests | Upstreamable smoke/regression tests | Partial-cleaned | all branches | Continue curation; active gate metadata and tier smoke fixtures now use semantic group names and neutral test data instead of planning phase labels. | Focused scan over `arch/um`, `tools/testing/selftests/um`, and `tools/uml/uml-launcher` found no standalone workstream/decision/memo/phase labels after cleanup, excluding operational post-mortem wording and archived redesign docs, 2026-06-10. |
 | Selftests | local stress/soak tests | Present | `next`, `umlctl-deploy` | Keep under clear local/soak docs. | selected soak gates. |
 | Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. | grep for diary/internal labels. |
-| Docs | `STATUS.md` | Present-needs-update | `next` | Update after every landed workstream. | status review. |
+| Docs | `STATUS.md` | Present-current | `next` | Update after every landed workstream. | status review updated with launcher/selftest curation boundary, 2026-06-10. |
 | Docs | old reports/presentations | Present-stale | `next`, historical docs | Refresh or mark historical. | docs audit. |
 | Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
+| Docs | active UML user docs | Present-needs-style-normalization | `next` | Remove workstream/decision-log/memo/phase-history references from non-redesign `Documentation/virt/uml/*.rst` files or mark them historical where appropriate. | Focused scan still finds planning/history labels in ftrace, kprobes, KMSAN, debugfs, section-split, snapshot, and several profile docs, 2026-06-10. |
 | Docs | vector2 validation docs | Present-needs-update | `next` | Align with final gates. | docs audit. |
 | Upstream | patch queue | Present-stale | `next` docs | Regenerate from final `next`. | checkpatch and cover letters. |
 
@@ -153,6 +154,13 @@ This file is the live execution tracker for
   exit status preservation, timeout reporting, and guest helper cleanup through
   `pool-exec-smoke`; `exec/1` is the current public ABI, while any stricter
   kernel argv transport is future `exec/2` work.
+- Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
+  SELinux policy headers, sandbox/research launcher examples, gate metadata,
+  tier smoke fixtures, and adjacent launcher/profile docs. Validation:
+  `cargo fmt --check`, `cargo test`, `python3 -m py_compile` for touched tier
+  smoke scripts, `umlctl gate list --source-root .`, dry-run parse of all
+  gate TOMLs, `uml-launcher run --dry-run --config` for the touched legacy
+  launcher examples, and `git diff --check` all passed on 2026-06-10.
 
 ## Remaining Hard Blockers
 
@@ -164,8 +172,9 @@ These items must be closed before the final branch can be called complete:
    pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
    now have dedicated smoke gates; per-take pool fd handoff has been retired
    from the current completion claim in favor of the validated TAP reopen path.
-4. Selftests and source comments must be cleaned of diary/history material on
-   upstream-facing paths.
+4. Remaining upstream-facing docs must be cleaned of diary/history material.
+   The focused active source, launcher, and selftest scan is clean for the
+   targeted standalone planning-label patterns as of 2026-06-10.
 5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules

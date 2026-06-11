@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# L1: ARCH=um kernel incremental build gate.
+# ARCH=um kernel incremental build gate.
 #
 # Catches the dumbest regression: a commit that breaks `make`. Cheap
 # (~5 sec on a warm cache, ~30 sec for a small change) so it runs on
@@ -10,15 +10,15 @@
 # capture).
 #
 # This gate doesn't run KUnit or boot the kernel; it just ensures
-# `vmlinux` was produced. L2 (kunit-marshal) chains off the same
-# build dir to validate behavior.
+# `vmlinux` was produced. Runtime gates can reuse the same build
+# dir to validate behavior.
 
 schema_version = 1
 
 [gate]
 name = "kernel-build"
 description = "make ARCH=um -j$(nproc) into ~/src/uml-builds/uml-clean"
-phase = "L1"
+phase = "build"
 
 [run]
 # We let the user override BUILD_DIR via env; default lands under

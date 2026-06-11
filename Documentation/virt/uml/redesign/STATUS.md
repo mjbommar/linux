@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, and umlbuild validation.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest curation, and umlbuild validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -298,7 +298,13 @@ developer-facing paths:
   binaries are supplied. The selftest now accepts `UMLBUILD_SOURCE`,
   `UMLBUILD`, and `UMLCTL` overrides so validating `umlbuild` does not require
   destructive cleanup of a developer tree that contains in-tree kernel build
-  products.
+  products; and
+- active launcher/selftest planning-label cleanup is partially closed:
+  focused scans over `arch/um`, `tools/testing/selftests/um`, and
+  `tools/uml/uml-launcher` no longer find standalone workstream, decision,
+  memo, or phase-label patterns after excluding operational post-mortem wording
+  and archived redesign material. Broader non-redesign UML docs still need a
+  dedicated style normalization pass.
 
 The active deployment path is `umlctl up/down` with Umlfile parsing, not a
 separate `deploy` subcommand.

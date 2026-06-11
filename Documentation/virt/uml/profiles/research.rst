@@ -28,8 +28,8 @@ Build
 Run
 ===
 
-Invoke the ``./linux`` binary directly or via ``uml-launcher``
-(workstream C-10). Example config at
+Invoke the ``./linux`` binary directly or via ``uml-launcher``.
+Example config at
 ``tools/uml/uml-launcher/examples/research.toml``::
 
    uml-launcher -v run \\

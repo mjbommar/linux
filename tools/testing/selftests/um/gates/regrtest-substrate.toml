@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# L3: full substrate gate (class-a-env + class-b-process +
+# Full substrate gate (class-a-env + class-b-process +
 # class-c-syscall + class-d-structural).
 #
 # Wraps run-regrtest-repros.sh, which boots a UML kernel with the
@@ -15,7 +15,7 @@
 #
 # Thresholds reflect the CURRENT LINE, not a target.
 #   - seccomp: PASS=25 FAIL=3 EXPECTED_FAIL=3
-#   - kvm-v2:  the PASS count varies by phase; today the class-a-env
+#   - kvm-v2:  the PASS count varies by backend; today the class-a-env
 #              subset is 6 while the class-b/c/d fork-state cases
 #              remain open.
 # A single threshold pair has to cover both backends, so we set the
@@ -32,7 +32,7 @@ schema_version = 1
 [gate]
 name = "regrtest-substrate"
 description = "Substrate gate: all 4 reproducer classes via run-regrtest-repros.sh"
-phase = "E.4"
+phase = "substrate"
 
 [run]
 cmd = "bash tools/testing/selftests/um/regrtest-repros/run-regrtest-repros.sh"

@@ -22,7 +22,7 @@ schema_version = 1
 [gate]
 name = "cpython-tier0"
 description = "CPython tier-0 parity (hashlib + numerics + containers + regex + strings + typing)"
-phase = "H.1b"
+phase = "python"
 
 [run]
 cmd = "bash tools/testing/selftests/um/cpython-tier0/run-cpython-tier0.sh"

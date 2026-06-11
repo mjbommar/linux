@@ -19,7 +19,7 @@ schema_version = 1
 [gate]
 name = "perf-getpid"
 description = "getpid() round-trip ratio kvm:seccomp"
-phase = "L5"
+phase = "performance"
 
 [run]
 cmd = "bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh"

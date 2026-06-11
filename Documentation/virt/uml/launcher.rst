@@ -86,8 +86,8 @@ Copy-paste starting points for common profiles ship in
   kprobes + BPF JIT) interactive shell. Note: KCOV coverage is
   intentionally off in ``research`` (see the profile doc for
   rationale); use ``fuzz`` / ``fuzz-deep`` when KCOV is needed.
-* ``sandbox.toml`` — sandbox-profile v1 shape (v2 will add
-  per-device isolation declarations).
+* ``sandbox.toml`` — sandbox-profile launch knobs; host-side
+  isolation is configured through vhost-user helpers and policy.
 * ``dev.toml`` — daily-driver defconfig + ``/bin/sh``.
 
 Signal handling
@@ -249,9 +249,6 @@ Further reading
 
 * ``Documentation/virt/uml/snapshot.rst`` — C-09 snapshot /
   forkserver surface that ``--forkserver`` interoperates with.
-* ``Documentation/virt/uml/redesign/02-workstreams/
-  C-profiles-and-gaps/10-host-launcher-crosvm.md`` — v1 design
-  + v2 roadmap + crate-stack rationale.
 * ``tools/uml/uml-launcher/README.md`` — build / install / local
   quickstart.
 * crosvm (https://crosvm.dev/) — architectural prior art for
