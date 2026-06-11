@@ -224,8 +224,10 @@ Remaining work:
 - Decide the final request-specific warm scheduling contract: either add a
   predeclared slot/identity API before warm fork, or route syzkaller through
   daemon-assigned ready identities with `pool take --ready`.
-- Decide whether the bounded shell-backed `exec` command string and guest
-  `timeout(1)` helper dependency are the final daemon-routed exec ABI.
+- Keep `exec/1` as the current public daemon-routed exec ABI. The bounded
+  shell-backed mconsole lowering and guest `timeout(1)` helper dependency are
+  documented implementation details; stricter kernel argv/env/cwd transport is
+  future `exec/2` work.
 - Re-run full `pool-bench` after fork/member lifetime fixes.
 - Keep validated failure reporting for kernels that lack the required mconsole
   `exec` primitive.
@@ -491,7 +493,8 @@ Validation:
 - pool member network smoke using vector2 TAP. Current status:
   `vector2-pool-tap-smoke` PASS on 2026-06-10.
 - launcher fd handoff smoke. Current status: `vector2-fd-handoff-smoke` PASS
-  on 2026-06-10, plus a decision on per-take pool fd handoff.
+  on 2026-06-10; per-take pool fd handoff is retired from the current
+  completion claim in favor of the validated pool TAP reopen path.
 - port-forward smoke.
 - selected Tier 3 vector2 workload after pool paths are stable.
 

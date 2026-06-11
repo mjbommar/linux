@@ -89,28 +89,32 @@ The active blockers are now:
    far above the original 100-member RSS target. Fresh smaps evidence shows
    the RSS miss is mostly private dirty memory, so a measurement-only change
    would not close the blocker. The throughput gate now passes.
-2. Decide the final daemon-routed guest exec ABI. The current smoke now proves
+2. Keep the final daemon-routed guest exec ABI explicit. The current smoke proves
    successful commands through the final member mconsole path: `/bin/true`
    exits 0, captured stdout/stderr round-trip through NDJSON, guest exit code
    7 is preserved as a normal exec result rather than a daemon error, and a
    one-second timeout returns exit code 124 with `timed_out=true`, no late
-   stdout, and no leaked guest `sleep` helper. The kernel command is bounded,
-   shell-backed, and currently uses a guest `timeout(1)` helper for
-   cancellation. The open decision is whether that command string/helper model
-   is the final ABI or whether completion requires stricter argv/env/cwd
-   encoding. A naive child-side mconsole rebind was tested locally and
-   rejected because it panicked before the member reached `MEMBER_DONE`; see
-   `2026-06-10-pool-mconsole-exec-investigation.md`. The checked-in
+   stdout, and no leaked guest `sleep` helper. `exec/1` is the current public
+   ABI: callers send structured argv/env/cwd/timeout to the daemon and receive
+   NDJSON frames. The mconsole backend deliberately lowers that request through
+   a bounded shell command, and `--timeout` requires guest `timeout(1)`. A
+   stricter kernel argv transport is future `exec/2` work, not required for the
+   current completion claim. A naive child-side mconsole rebind was tested
+   locally and rejected because it panicked before the member reached
+   `MEMBER_DONE`; see `2026-06-10-pool-mconsole-exec-investigation.md`. The
+   checked-in
    `pool-mconsole-path-probe` now passes as a focused socket-addressability
    gate.
 3. Decide the final request-specific warm scheduling contract. Either add a
    predeclared slot/identity API before warm fork, or route syzkaller and other
    fast consumers through daemon-assigned ready identities with
    `pool take --ready`.
-4. Decide whether the historical per-take pool fd handoff design is required.
-   Vector2 sandbox audit, launcher-owned fd handoff, and pool-member TAP
-   handoff now have live smoke gates; the remaining vector2 networking gates
-   still need multiqueue/fairness, Tier 3 seccomp, and KVM v2 coverage.
+4. Keep the historical per-take pool fd handoff decision explicit: it is
+   retired from the current completion claim in favor of the validated pool TAP
+   reopen path. Vector2 sandbox audit, launcher-owned fd handoff, and
+   pool-member TAP handoff now have live smoke gates; the remaining vector2
+   networking gates still need multiqueue/fairness, Tier 3 seccomp, and KVM v2
+   coverage.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig and keep it out of the completion claim.
 6. Decide whether the historical KVM v2 private state trace should be imported
@@ -719,11 +723,10 @@ Current comparison result:
   kernel applies MAC/TAP/mconsole identity before the member is forked.
 - Current template-pause, fork, spawn, serve, port-forward, and reduced
   benchmark smokes pass on the live replicated-member path.
-- The remaining pool/fork gaps are full default `pool-bench` RSS and the final
-  daemon-routed guest exec ABI decision. Vector2 pool-member TAP handoff and
-  syzkaller-style take/exec/destroy now have dedicated passing smoke gates.
-  Per-take pool fd handoff remains a separate historical SCM_RIGHTS design
-  decision, not current implemented behavior.
+- The remaining pool/fork gap is full default `pool-bench` RSS. Vector2
+  pool-member TAP handoff and syzkaller-style take/exec/destroy now have
+  dedicated passing smoke gates. Per-take pool fd handoff is retired from the
+  current completion claim in favor of the validated pool TAP reopen path.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
   or replaced as cleaned kselftests because the underlying snapshot hooks now
   exist on `next`. Current status: imported and PASS on 2026-06-10.
@@ -1092,15 +1095,15 @@ Current status:
   pass on the current path.
 - Full default `pool-bench` still fails RSS; throughput now passes.
 - Daemon-routed guest exec passes for command success, stdout/stderr capture,
-  exit-status preservation, timeout reporting, and helper cleanup; the final
-  ABI/helper dependency decision remains open.
+  exit-status preservation, timeout reporting, and helper cleanup. `exec/1` is
+  the current public ABI; the bounded shell-backed mconsole lowering and guest
+  `timeout(1)` helper dependency are documented implementation details.
 
 Exit criteria:
 
 - Pool serve/take/port-forward continues to pass on live members.
-- Successful daemon-routed guest exec works through the final published ABI,
-  or any experimental shell/helper dependency is explicitly documented outside
-  the completion claim.
+- Successful daemon-routed guest exec works through the final published
+  `exec/1` ABI; any future stricter kernel argv transport uses a new schema.
 - Full pool benchmark passes, or the original RSS target is revised with
   evidence and approval while throughput remains green.
 - Vector2 TAP handoff works through live pool members. Current status: PASS on
@@ -1109,8 +1112,8 @@ Exit criteria:
   through `vector2-fd-handoff-smoke`; per-take pool fd handoff is explicitly
   retired from the current completion claim in favor of the validated pool TAP
   reopen path.
-- Syzkaller-style take/exec/destroy works through the current path; keep it
-  aligned with the final exec ABI decision.
+- Syzkaller-style take/exec/destroy works through the current `exec/1` path;
+  keep future schema bumps explicit.
 - Missing `memo09-*` functionality is either landed or explicitly retired.
 
 ### Phase 4: Record/Replay
@@ -1304,7 +1307,7 @@ branch lands.
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
-| Pool exec | Successful command, stdout/stderr capture, exit-status preservation, timeout reporting, and helper cleanup validated | Final ABI/helper dependency decision made | Validated path; ABI decision open |
+| Pool exec | Successful command, stdout/stderr capture, exit-status preservation, timeout reporting, and helper cleanup validated | Public `exec/1` ABI documented; future stricter kernel argv transport assigned to `exec/2` | Closed for current completion claim |
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
 | Syzkaller shim | Present | End-to-end smoke | Open |
@@ -1395,9 +1398,9 @@ Result:
   does not leak an extra guest `sleep` helper;
 - stale daemon error boundaries such as missing `uml_mconsole(1)`, missing
   member socket, or kernel `Unknown command` are rejected by the selftest;
-- the remaining exec work is the final ABI decision: keep the current bounded
-  shell-backed command string plus guest `timeout(1)` helper dependency, or
-  replace it with stricter argv/env/cwd encoding before claiming completion.
+- `exec/1` is the current public ABI; the bounded shell-backed command string
+  and guest `timeout(1)` helper dependency are documented implementation
+  details, and stricter kernel argv/env/cwd transport is future `exec/2` work.
 
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
@@ -1570,8 +1573,8 @@ Immediate engineering conclusion:
   syzkaller-style take/exec/port-forward/status/destroy wire path through
   `umlctl`;
 - final completion requires fixing the full-scale pool benchmark RSS failure,
-  resolving the request-specific warm scheduling decision or API, vector2
-  TAP/fd pool networking, and the final daemon-routed exec ABI decision.
+  resolving the request-specific warm scheduling decision or API, and finishing
+  the remaining vector2 networking gates.
 
 ## Immediate Next Actions
 
@@ -1585,15 +1588,11 @@ Immediate engineering conclusion:
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.
-3. Decide whether the bounded shell-backed `exec` command string and guest
-   `timeout(1)` helper dependency are the final daemon-routed exec ABI, or
-   replace them with stricter argv/env/cwd encoding before claiming
-   completion. The current `pool-exec-smoke` already validates command
-   success, stdout/stderr/status, timeout reporting, late-output suppression,
-   and helper cleanup.
-4. Decide whether per-take pool fd handoff is required or should be retired;
-   launcher-owned vector2 fd handoff is now covered by
-   `vector2-fd-handoff-smoke`.
+3. Keep the daemon-routed `exec/1` ABI covered by `pool-exec-smoke` and the
+   syzkaller shim smoke. Stricter kernel argv/env/cwd transport is future
+   `exec/2` work, not a current completion blocker.
+4. Keep the retired per-take pool fd handoff boundary covered in status docs;
+   launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
 6. Decide whether private state trace is worth importing as clean optional

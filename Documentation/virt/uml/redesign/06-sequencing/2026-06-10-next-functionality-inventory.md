@@ -90,7 +90,7 @@ This file is the live execution tracker for
 | Pool | Warm member pool | Partial-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Daemon-assigned `min_warm` ready members are implemented and validated; request-specific warm identity scheduling still needs a final API/contract decision. | `pool-serve-smoke` PASS with `--min-warm=1`, ready take, replenish, destroy, and shutdown, 2026-06-10. |
 | Pool | Pool benchmark thresholds | Present-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4` | Reduced live-child benchmark passes; full default benchmark now closes the throughput gate and still needs RSS closure or a documented target revision. | Reduced raw `pool-bench` PASS 5/5 with p50 0.5 ms, p99 0.9 ms, and 148.6 MiB RSS; full `pool-bench` PASS 4/5, FAIL RSS 5,486.9 MiB/200 MiB with 3,964.5 MiB private dirty, and throughput PASS 3000/3000, 2026-06-10. |
 | Pool | mconsole path synthesis | Present-validated | `next`, `memo09-phase4` | Keep the master-side bind plus child-side SIGIO rearm model; avoid the rejected child-side rebind experiment that panicked before `MEMBER_DONE`. | `pool-mconsole-path-probe` PASS with member alive, per-member socket present, and `version` reply; focused investigation in `2026-06-10-pool-mconsole-exec-investigation.md`, 2026-06-10. |
-| Pool | `umlctl exec` via daemon | Present-validated-needs-decision | `next`, `memo09-phase4` | Keep the current bounded exec path for now; decide whether shell-backed command strings and the guest `timeout(1)` helper dependency are the final ABI before the completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected, 2026-06-10. |
+| Pool | `umlctl exec` via daemon | Present-validated | `next`, `memo09-phase4` | Keep `exec/1` as the current public ABI: callers send structured argv/env/cwd/timeout to the daemon and receive NDJSON frames. The current mconsole backend deliberately lowers that request through a bounded shell command; `--timeout` requires guest `timeout(1)`. Any stricter kernel transport is future `exec/2` work, not required for the current completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected; historical `memo09`/`umlctl-deploy` branches had the same outer RPC/NDJSON intent and no stricter kernel argv transport to import, 2026-06-10. |
 | Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, 2026-06-10. |
 | Pool | Vector2 TAP handoff | Present-validated | `next`, `memo09-phase4`, `umlctl-deploy` | Keep the vector2 TAP reopen path and smoke gate. Per-take pool fd handoff is retired from the current completion claim; current pool takes carry string identity through the identity memfd and reopen vec2 TAP by per-member TAP name. | `vector2-pool-tap-smoke` PASS: per-member TAP/MAC/IPv4 identity visible through daemon exec and one-packet host TAP ping succeeds; source audit confirms `um_template_identity_apply()` calls `um_vec2_tap_reopen_for_pool_member()` before IPv4/route apply, 2026-06-10. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
@@ -109,7 +109,7 @@ This file is the live execution tracker for
 | Launcher | snapshot export CLI | Present-validated | `next`, `kvm-v2-snapshot-elf64` | Keep mconsole-driven host export path. | live `umlctl snapshot export` smoke PASS, 2026-06-10. |
 | Launcher | transparency tooling | Present-needs-validation | `next`, `umlctl-deploy` | Keep if docs/tests match. | transparency smoke. |
 | Launcher | `umlbuild` | Present-needs-validation | `next`, `umlctl-deploy` | Keep and run MVP smoke. | `umlbuild` smoke. |
-| Syzkaller | UML VM shim | Present-validated-needs-ABI-decision | `next`, `umlctl-deploy` | Keep the shim aligned with the final exec ABI; current take/exec/port-forward/status/destroy wire path is validated. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, 2026-06-10. |
+| Syzkaller | UML VM shim | Present-validated | `next`, `umlctl-deploy` | Keep the shim on the validated `umlctl` JSON contracts, including `exec/1` NDJSON frames. Future `exec/2` changes require a schema bump and shim update. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, 2026-06-10. |
 | Profiles | profile configs | Partial | `next`, historical docs | Build and test matrix required. | profile build matrix. |
 | Instrumentation | kprobes | Present-needs-validation | `next` | Keep and test. | kprobes stress. |
 | Instrumentation | ftrace | Present-needs-validation | `next` | Keep and test. | ftrace smoke. |
@@ -146,8 +146,8 @@ This file is the live execution tracker for
   `-EOPNOTSUPP` when more than one CPU is online.
 - Daemon-routed pool exec now validates success, stdout/stderr capture, guest
   exit status preservation, timeout reporting, and guest helper cleanup through
-  `pool-exec-smoke`; the remaining exec work is the final ABI/helper
-  dependency decision.
+  `pool-exec-smoke`; `exec/1` is the current public ABI, while any stricter
+  kernel argv transport is future `exec/2` work.
 
 ## Remaining Hard Blockers
 

@@ -76,3 +76,11 @@ The shim depends on these `umlctl` JSON shapes:
 
 Schema bumps should be reflected in the `schema_version` field carried
 by the relevant frame.
+
+`exec/1` is the current stable execution contract. The shim sends argv through
+`umlctl exec --json`, and `umlctl` sends structured argv/env/cwd/timeout fields
+to the pool daemon. The daemon may lower that request through the current UML
+mconsole `exec` command internally. In this implementation `--timeout` requires
+the guest image to provide `timeout(1)` at `/usr/bin/timeout` or `/bin/timeout`.
+A stricter daemon-to-kernel argv transport is future `exec/2` work and must use
+a schema bump.

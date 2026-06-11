@@ -10,10 +10,12 @@ goal for daemon-routed guest execution.
 
 Current `pool-exec-smoke` proves the NDJSON wire shape, successful command
 execution inside a pool member, stdout/stderr capture, guest exit-status
-preservation, timeout reporting, and guest helper cleanup. The remaining
-question is whether the current shell-backed command string plus guest
-`timeout(1)` helper dependency is the final ABI, or whether completion should
-require stricter argv/env/cwd encoding.
+preservation, timeout reporting, and guest helper cleanup. The decision from
+the follow-up audit is that `exec/1` is the current public ABI: callers send
+structured argv/env/cwd/timeout to the daemon and receive NDJSON frames. The
+bounded shell-backed mconsole command string and guest `timeout(1)` helper are
+documented implementation details. A stricter kernel argv/env/cwd transport is
+future `exec/2` work.
 
 ## Current Verified Behavior
 
@@ -177,11 +179,11 @@ captured stdout/stderr, and guest exit code 7 is preserved without a daemon
 transport error.
 
 Timeout/cancellation is now implemented for the current shell-backed command
-contract by relying on the guest `timeout(1)` helper. This is good enough for
-the current selftest contract, but it leaves one design decision before the
-completion claim: whether the final ABI should keep a shell command string and
-guest helper dependency, or move to stricter argv/env/cwd encoding with a
-kernel-owned cancellation mechanism.
+contract by relying on the guest `timeout(1)` helper. This is accepted for the
+current `exec/1` completion claim because the public ABI is the structured
+daemon RPC plus NDJSON frame stream, not the daemon-to-mconsole lowering.
+Replacing the mconsole lowering with stricter argv/env/cwd encoding and a
+kernel-owned cancellation mechanism is future `exec/2` work.
 
 ## Next Work
 
@@ -195,6 +197,5 @@ Recommended next sequence:
 2. Keep `pool-exec-smoke` as the regression gate for command success,
    stdout/stderr/status, timeout reporting, late-output suppression, and
    helper cleanup.
-3. Decide whether the shell-backed command string plus guest `timeout(1)`
-   helper dependency is the final ABI or whether it should be replaced with a
-   stricter argv/env/cwd encoding before the completion claim.
+3. Keep `exec/1` documented as the current public ABI. Treat stricter
+   daemon-to-kernel argv/env/cwd transport as future `exec/2` work.

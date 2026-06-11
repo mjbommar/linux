@@ -230,10 +230,11 @@ Current boundary:
   captured stdout/stderr and guest exit code 7, a one-second timeout returns
   exit code 124 with `timed_out=true`, no late stdout, and no leaked guest
   `sleep` helper, and stale daemon error boundaries such as missing
-  `uml_mconsole(1)` or kernel `Unknown command` are rejected; the remaining
-  exec decision is whether the bounded shell-backed command string plus guest
-  `timeout(1)` helper dependency is the final ABI, or whether it should be
-  replaced by stricter argv/env/cwd encoding before the completion claim;
+  `uml_mconsole(1)` or kernel `Unknown command` are rejected; `exec/1` is the
+  current public ABI, while the bounded shell-backed mconsole lowering and guest
+  `timeout(1)` helper dependency are documented implementation details. A
+  stricter kernel argv/env/cwd transport is future `exec/2` work, not a blocker
+  for the current completion claim;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
