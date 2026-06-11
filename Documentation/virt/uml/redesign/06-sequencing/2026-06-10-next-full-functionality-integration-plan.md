@@ -908,7 +908,9 @@ Acceptance gates:
   checksum handling with legacy vector and moves the local vector2 median to
   0.9990 MiB/s, but the same rerun still leaves legacy vector ahead at
   1.6090 MiB/s, ratio 0.6209. The host-to-guest no-regression cell remains
-  open.
+  open. The helper now emits `aggregate.tsv` and `comparison.tsv` so future
+  fixed-byte runs expose per-driver medians/bests and vector2/vector ratios
+  without hand parsing raw rows.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,

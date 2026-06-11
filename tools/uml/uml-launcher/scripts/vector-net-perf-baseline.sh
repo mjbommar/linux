@@ -31,6 +31,11 @@ Environment overrides:
   UML_VECTOR_PERF_UDP_PAYLOAD UDP payload size per datagram, default: 1472
   UML_VECTOR_PERF_UDP_PACE_USEC sleep between UDP datagrams, default: 0
   UML_VECTOR_PERF_OUT        output directory, default: /tmp/um-vector-perf-baseline
+
+Outputs:
+  summary.tsv       raw per-run rows
+  aggregate.tsv     per-driver median/best throughput and median CPU/scheduler data
+  comparison.tsv    vector2/vector ratios when both drivers are present
 EOF
 }
 
@@ -404,6 +409,189 @@ print(
     f"{delta('nr_involuntary_ctxt_switches')}",
     end="",
 )
+PY
+}
+
+write_aggregate_summaries() {
+	local aggregate="$out/aggregate.tsv"
+	local comparison="$out/comparison.tsv"
+
+	python3 - "$summary" "$aggregate" "$comparison" <<'PY'
+import csv
+import statistics
+import sys
+from collections import defaultdict
+
+summary_path, aggregate_path, comparison_path = sys.argv[1:]
+
+with open(summary_path, encoding="utf-8") as f:
+    rows = list(csv.DictReader(f, delimiter="\t"))
+
+def number(row, key):
+    value = row.get(key, "")
+    if not value or value == "NA":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def values(rows, key):
+    return [value for row in rows if (value := number(row, key)) is not None]
+
+def fmt(value):
+    if value is None:
+        return "NA"
+    return f"{value:.6f}"
+
+def median(rows, key):
+    vals = values(rows, key)
+    if not vals:
+        return None
+    return statistics.median(vals)
+
+def best(rows, key):
+    vals = values(rows, key)
+    if not vals:
+        return None
+    return max(vals)
+
+def ratio(candidate, baseline):
+    if candidate is None or baseline is None or baseline == 0:
+        return None
+    return candidate / baseline
+
+grouped = defaultdict(list)
+for row in rows:
+    grouped[(row["protocol"], row["direction"], row["bytes"], row["driver"])].append(row)
+
+aggregate_fields = [
+    "protocol",
+    "direction",
+    "bytes",
+    "driver",
+    "repeats",
+    "guest_mib_s_median",
+    "guest_mib_s_best",
+    "host_mib_s_median",
+    "host_mib_s_best",
+    "guest_cpu_seconds_median",
+    "host_cpu_seconds_median",
+    "uml_user_cpu_seconds_median",
+    "uml_system_cpu_seconds_median",
+    "uml_sched_run_seconds_median",
+    "uml_sched_wait_seconds_median",
+    "uml_sched_pcount_delta_median",
+    "uml_voluntary_ctxt_switches_delta_median",
+    "uml_involuntary_ctxt_switches_delta_median",
+]
+
+with open(aggregate_path, "w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=aggregate_fields, delimiter="\t")
+    writer.writeheader()
+    for protocol, direction, byte_count, driver in sorted(grouped):
+        group = grouped[(protocol, direction, byte_count, driver)]
+        writer.writerow({
+            "protocol": protocol,
+            "direction": direction,
+            "bytes": byte_count,
+            "driver": driver,
+            "repeats": len(group),
+            "guest_mib_s_median": fmt(median(group, "guest_mib_s")),
+            "guest_mib_s_best": fmt(best(group, "guest_mib_s")),
+            "host_mib_s_median": fmt(median(group, "host_mib_s")),
+            "host_mib_s_best": fmt(best(group, "host_mib_s")),
+            "guest_cpu_seconds_median": fmt(median(group, "guest_cpu_seconds")),
+            "host_cpu_seconds_median": fmt(median(group, "host_cpu_seconds")),
+            "uml_user_cpu_seconds_median": fmt(median(group, "uml_user_cpu_seconds")),
+            "uml_system_cpu_seconds_median": fmt(median(group, "uml_system_cpu_seconds")),
+            "uml_sched_run_seconds_median": fmt(median(group, "uml_sched_run_seconds")),
+            "uml_sched_wait_seconds_median": fmt(median(group, "uml_sched_wait_seconds")),
+            "uml_sched_pcount_delta_median": fmt(median(group, "uml_sched_pcount_delta")),
+            "uml_voluntary_ctxt_switches_delta_median": fmt(
+                median(group, "uml_voluntary_ctxt_switches_delta")
+            ),
+            "uml_involuntary_ctxt_switches_delta_median": fmt(
+                median(group, "uml_involuntary_ctxt_switches_delta")
+            ),
+        })
+
+comparison_fields = [
+    "protocol",
+    "direction",
+    "bytes",
+    "baseline_driver",
+    "candidate_driver",
+    "baseline_repeats",
+    "candidate_repeats",
+    "guest_mib_s_median_ratio",
+    "guest_mib_s_best_ratio",
+    "host_mib_s_median_ratio",
+    "host_mib_s_best_ratio",
+    "uml_system_cpu_seconds_median_ratio",
+    "uml_sched_run_seconds_median_ratio",
+    "uml_sched_pcount_delta_median_ratio",
+    "uml_voluntary_ctxt_switches_delta_median_ratio",
+]
+
+by_shape = defaultdict(dict)
+for (protocol, direction, byte_count, driver), group in grouped.items():
+    by_shape[(protocol, direction, byte_count)][driver] = group
+
+with open(comparison_path, "w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=comparison_fields, delimiter="\t")
+    writer.writeheader()
+    for protocol, direction, byte_count in sorted(by_shape):
+        drivers = by_shape[(protocol, direction, byte_count)]
+        if "vector" not in drivers or "vector2" not in drivers:
+            continue
+        base = drivers["vector"]
+        candidate = drivers["vector2"]
+        writer.writerow({
+            "protocol": protocol,
+            "direction": direction,
+            "bytes": byte_count,
+            "baseline_driver": "vector",
+            "candidate_driver": "vector2",
+            "baseline_repeats": len(base),
+            "candidate_repeats": len(candidate),
+            "guest_mib_s_median_ratio": fmt(
+                ratio(median(candidate, "guest_mib_s"), median(base, "guest_mib_s"))
+            ),
+            "guest_mib_s_best_ratio": fmt(
+                ratio(best(candidate, "guest_mib_s"), best(base, "guest_mib_s"))
+            ),
+            "host_mib_s_median_ratio": fmt(
+                ratio(median(candidate, "host_mib_s"), median(base, "host_mib_s"))
+            ),
+            "host_mib_s_best_ratio": fmt(
+                ratio(best(candidate, "host_mib_s"), best(base, "host_mib_s"))
+            ),
+            "uml_system_cpu_seconds_median_ratio": fmt(
+                ratio(
+                    median(candidate, "uml_system_cpu_seconds"),
+                    median(base, "uml_system_cpu_seconds"),
+                )
+            ),
+            "uml_sched_run_seconds_median_ratio": fmt(
+                ratio(
+                    median(candidate, "uml_sched_run_seconds"),
+                    median(base, "uml_sched_run_seconds"),
+                )
+            ),
+            "uml_sched_pcount_delta_median_ratio": fmt(
+                ratio(
+                    median(candidate, "uml_sched_pcount_delta"),
+                    median(base, "uml_sched_pcount_delta"),
+                )
+            ),
+            "uml_voluntary_ctxt_switches_delta_median_ratio": fmt(
+                ratio(
+                    median(candidate, "uml_voluntary_ctxt_switches_delta"),
+                    median(base, "uml_voluntary_ctxt_switches_delta"),
+                )
+            ),
+        })
 PY
 }
 
@@ -787,3 +975,6 @@ for driver in "${driver_list[@]}"; do
 done
 
 echo "summary: $summary"
+write_aggregate_summaries
+echo "aggregate: $out/aggregate.tsv"
+echo "comparison: $out/comparison.tsv"

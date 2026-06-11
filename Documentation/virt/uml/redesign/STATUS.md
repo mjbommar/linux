@@ -376,6 +376,16 @@ Current bounded vector2 evidence adds:
   host-side median from 0.8850 MiB/s to 0.9990 MiB/s in the local sample, but
   the no-regression gate remains open: legacy vector's median was
   1.6090 MiB/s, for a vector2/legacy ratio of 0.6209.
+- The fixed-byte performance helper now writes derived `aggregate.tsv` and
+  `comparison.tsv` files next to the raw `summary.tsv`.  `aggregate.tsv`
+  records per-driver medians/bests for throughput and median endpoint/UML
+  process CPU and scheduler deltas.  `comparison.tsv` records vector2/vector
+  ratios for matching protocol/direction/byte-count cells.  Validation reports
+  `bash -n`, `git diff --check`, and a two-repeat TCP 64 KiB host-to-guest
+  legacy/vector2 smoke with all raw summary rows at 22 fields, aggregate rows
+  at 18 fields, and comparison rows at 15 fields.  This does not close the
+  CPU-utilisation or syscall-rate publication gates; it makes the existing
+  unprivileged timing and scheduler evidence directly auditable.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
