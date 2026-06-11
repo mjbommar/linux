@@ -77,6 +77,7 @@ CASES=(
 	"test_record_gadget_bypass_page"
 	"test_record_strict_syscall_policy"
 	"test_record_observe_syscall"
+	"test_record_entry_format_contract"
 	"test_record_replay_syscall_fifo"
 	"test_record_syscall_payload_fifo"
 	"test_record_syscall_payload_short_buffer"

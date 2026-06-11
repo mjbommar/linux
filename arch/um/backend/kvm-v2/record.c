@@ -505,6 +505,24 @@ static size_t kvm_v2_record_payload_entry_size(size_t payload_len)
 		     sizeof(u64));
 }
 
+static void kvm_v2_record_init_entry(struct kvm_v2_replay_entry *entry,
+				     u32 kind, u32 size, u64 sequence)
+{
+	entry->kind = kind;
+	entry->size = size;
+	entry->sequence = sequence;
+	entry->version = KVM_V2_RECORD_FORMAT_VERSION;
+	entry->flags = KVM_V2_RECORD_ENTRY_F_NONE;
+}
+
+static bool kvm_v2_record_entry_matches(const struct kvm_v2_replay_entry *entry,
+					u32 kind)
+{
+	return entry->kind == kind &&
+	       entry->version == KVM_V2_RECORD_FORMAT_VERSION &&
+	       entry->flags == KVM_V2_RECORD_ENTRY_F_NONE;
+}
+
 void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 				   unsigned long syscall_nr,
 				   long ret_value,
@@ -528,9 +546,8 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 	entry = (struct kvm_v2_replay_entry *)
 		((u8 *)rec->buffer + rec->buffer_used);
 	memset(entry, 0, sizeof(*entry));
-	entry->kind = KVM_V2_REPLAY_SYSCALL;
-	entry->size = (u32)need;
-	entry->sequence = ++rec->sequence;
+	kvm_v2_record_init_entry(entry, KVM_V2_REPLAY_SYSCALL, (u32)need,
+				 ++rec->sequence);
 	entry->syscall.nr = (s32)syscall_nr;
 	entry->syscall.retval = (s64)ret_value;
 	kvm_v2_record_fill_syscall_args(entry->syscall.args, regs);
@@ -576,9 +593,8 @@ int kvm_v2_record_observe_syscall_payload(struct kvm_v2_record *rec,
 	entry = (struct kvm_v2_replay_entry *)
 		((u8 *)rec->buffer + rec->buffer_used);
 	memset(entry, 0, need);
-	entry->kind = KVM_V2_REPLAY_SYSCALL_PAYLOAD;
-	entry->size = (u32)need;
-	entry->sequence = ++rec->sequence;
+	kvm_v2_record_init_entry(entry, KVM_V2_REPLAY_SYSCALL_PAYLOAD,
+				 (u32)need, ++rec->sequence);
 	entry->syscall_payload.nr = (s32)syscall_nr;
 	entry->syscall_payload.arg_index = arg_index;
 	entry->syscall_payload.retval = (s64)ret_value;
@@ -627,7 +643,7 @@ int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 	}
 
 	entry = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
-	if (entry->kind != KVM_V2_REPLAY_SYSCALL ||
+	if (!kvm_v2_record_entry_matches(entry, KVM_V2_REPLAY_SYSCALL) ||
 	    entry->size != sizeof(*entry) ||
 	    cursor + entry->size > rec->buffer_used ||
 	    entry->syscall.nr != (s32)syscall_nr) {
@@ -681,7 +697,7 @@ int kvm_v2_record_consume_syscall_payload(struct kvm_v2_record *rec,
 	}
 
 	entry = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
-	if (entry->kind != KVM_V2_REPLAY_SYSCALL_PAYLOAD ||
+	if (!kvm_v2_record_entry_matches(entry, KVM_V2_REPLAY_SYSCALL_PAYLOAD) ||
 	    entry->size < sizeof(*entry) ||
 	    cursor + entry->size > rec->buffer_used ||
 	    entry->syscall_payload.nr != (s32)syscall_nr ||
@@ -758,9 +774,8 @@ void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
 	entry = (struct kvm_v2_replay_entry *)
 		((u8 *)rec->buffer + rec->buffer_used);
 	memset(entry, 0, sizeof(*entry));
-	entry->kind = KVM_V2_REPLAY_TIME_TRAVEL;
-	entry->size = (u32)need;
-	entry->sequence = ++rec->sequence;
+	kvm_v2_record_init_entry(entry, KVM_V2_REPLAY_TIME_TRAVEL,
+				 (u32)need, ++rec->sequence);
 	entry->time_travel.ns_at_advance = ns_at_advance;
 	entry->time_travel.syscall_count_anchor = rec->syscall_count;
 
@@ -799,7 +814,7 @@ int kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
 	}
 
 	entry = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
-	if (entry->kind != KVM_V2_REPLAY_TIME_TRAVEL ||
+	if (!kvm_v2_record_entry_matches(entry, KVM_V2_REPLAY_TIME_TRAVEL) ||
 	    entry->size != sizeof(*entry) ||
 	    cursor + entry->size > rec->buffer_used) {
 		rc = -EILSEQ;
@@ -1099,6 +1114,12 @@ static int kvm_v2_record_status_show(struct seq_file *m, void *v)
 	seq_printf(m, "state: %s\n", kvm_v2_record_state_name(rec->state));
 	seq_printf(m, "enabled: %u\n", enabled ? 1 : 0);
 	seq_printf(m, "strict: %u\n", rec->strict_replay ? 1 : 0);
+	seq_printf(m, "format_version: %u\n", KVM_V2_RECORD_FORMAT_VERSION);
+	seq_printf(m, "entry_header_size: %zu\n",
+		   (size_t)KVM_V2_RECORD_ENTRY_HEADER_SIZE);
+	seq_printf(m, "entry_size: %zu\n",
+		   sizeof(struct kvm_v2_replay_entry));
+	seq_printf(m, "max_payload: %u\n", KVM_V2_RECORD_MAX_PAYLOAD);
 	seq_printf(m, "snapshot_attempted: %u\n",
 		   rec->snapshot_attempted ? 1 : 0);
 	seq_printf(m, "snapshot_valid: %u\n", rec->snapshot_valid ? 1 : 0);

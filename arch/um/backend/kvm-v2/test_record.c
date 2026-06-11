@@ -190,6 +190,8 @@ static void test_record_observe_syscall(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, entry->kind, (u32)KVM_V2_REPLAY_SYSCALL);
 	KUNIT_EXPECT_EQ(test, entry->size, (u32)sizeof(*entry));
 	KUNIT_EXPECT_EQ(test, entry->sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, entry->version, KVM_V2_RECORD_FORMAT_VERSION);
+	KUNIT_EXPECT_EQ(test, entry->flags, KVM_V2_RECORD_ENTRY_F_NONE);
 	KUNIT_EXPECT_EQ(test, entry->syscall.nr, 39);
 	KUNIT_EXPECT_EQ(test, entry->syscall.retval, -4LL);
 	KUNIT_EXPECT_EQ(test, entry->syscall.args[0], regs.gp[HOST_DI]);
@@ -199,6 +201,50 @@ static void test_record_observe_syscall(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
 	kvm_v2_record_observe_syscall(rec, 39, 0, &regs);
 	KUNIT_EXPECT_EQ(test, rec->buffer_used, used);
+
+	kvm_v2_record_destroy(rec);
+}
+
+static void test_record_entry_format_contract(struct kunit *test)
+{
+	struct kvm_v2_replay_entry *entry;
+	struct kvm_v2_record *rec;
+	size_t cursor;
+	long got = -1;
+
+	KUNIT_EXPECT_EQ(test, KVM_V2_RECORD_FORMAT_VERSION, 1U);
+	KUNIT_EXPECT_EQ(test, KVM_V2_RECORD_ENTRY_F_NONE, 0U);
+	KUNIT_EXPECT_GT(test, (size_t)KVM_V2_RECORD_ENTRY_HEADER_SIZE, 0UL);
+	KUNIT_EXPECT_LT(test, (size_t)KVM_V2_RECORD_ENTRY_HEADER_SIZE,
+			sizeof(struct kvm_v2_replay_entry));
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	kvm_v2_record_observe_syscall(rec, 39, 1234, NULL);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+
+	entry = rec->buffer;
+	KUNIT_ASSERT_EQ(test, entry->version, KVM_V2_RECORD_FORMAT_VERSION);
+	KUNIT_ASSERT_EQ(test, entry->flags, KVM_V2_RECORD_ENTRY_F_NONE);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+	cursor = rec->buffer_replayed;
+	entry->version++;
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_consume_syscall(rec, 39, &got),
+			-EILSEQ);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, cursor);
+	entry->version = KVM_V2_RECORD_FORMAT_VERSION;
+
+	entry->flags = 1;
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_consume_syscall(rec, 39, &got),
+			-EILSEQ);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, cursor);
+	entry->flags = KVM_V2_RECORD_ENTRY_F_NONE;
+
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_consume_syscall(rec, 39, &got),
+			1);
+	KUNIT_EXPECT_EQ(test, got, 1234L);
 
 	kvm_v2_record_destroy(rec);
 }
@@ -609,6 +655,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_gadget_bypass_page),
 	KUNIT_CASE(test_record_strict_syscall_policy),
 	KUNIT_CASE(test_record_observe_syscall),
+	KUNIT_CASE(test_record_entry_format_contract),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_syscall_payload_fifo),
 	KUNIT_CASE(test_record_syscall_payload_short_buffer),

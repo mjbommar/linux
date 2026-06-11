@@ -18,6 +18,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <linux/stddef.h>
 #include <linux/types.h>
 
 #include <backend.h>
@@ -729,12 +730,16 @@ enum kvm_v2_replay_kind {
 	KVM_V2_REPLAY_SYSCALL_PAYLOAD,
 };
 
+#define KVM_V2_RECORD_FORMAT_VERSION	1U
+#define KVM_V2_RECORD_ENTRY_F_NONE	0U
 #define KVM_V2_RECORD_MAX_PAYLOAD	4096U
 
 struct kvm_v2_replay_entry {
 	u32	kind;
 	u32	size;
 	u64	sequence;
+	u32	version;
+	u32	flags;
 	union {
 		struct {
 			s32	nr;
@@ -756,6 +761,9 @@ struct kvm_v2_replay_entry {
 		} syscall_payload;
 	};
 };
+
+#define KVM_V2_RECORD_ENTRY_HEADER_SIZE	\
+	offsetof(struct kvm_v2_replay_entry, syscall)
 
 struct kvm_v2_record {
 	enum kvm_v2_record_state	state;

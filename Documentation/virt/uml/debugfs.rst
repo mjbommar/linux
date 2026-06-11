@@ -158,6 +158,10 @@ record container control surface:
       state: stopped
       enabled: 0
       strict: 1
+      format_version: 1
+      entry_header_size: 24
+      entry_size: 96
+      max_payload: 4096
       snapshot_attempted: 1
       snapshot_valid: 1
       snapshot_rc: 0
@@ -165,7 +169,7 @@ record container control surface:
       snapshot_task_state: 1
       snapshot_source_pid: 1
       buffer_size: 1048576
-      buffer_used: 35328
+      buffer_used: 38504
       buffer_replayed: 0
       sequence: 397
       entries_recorded: 397
@@ -199,7 +203,10 @@ Strict replay currently allows the R/R-1 scalar task-owned subset
 syscalls fail closed and update the strict replay failure counters instead of
 falling back to live execution. Full deterministic replay still needs broader
 payload coverage plus raw time/RDTSC, signal, and device policy described in
-the redesign plan.
+the redesign plan. The current in-memory event format is versioned and
+debugfs reports its header size, total fixed entry size, and maximum
+variable payload length so validation tools can reject stale logs instead of
+guessing their shape.
 
 Cost impact
 ===========
