@@ -128,6 +128,10 @@ run:
 - Kconfig now keeps v2 opt-in without saying the existing vector driver is
   superseded or telling new deployments to prefer v2. The v2 help text names
   TAP and inherited fd as the current netdev runtime scope.
+- `fail_open_after=N` remains available for the live vector2 open-unwind gate,
+  but it is documented as validation-only in the kernel config structure,
+  umlctl schema comments, and example README. Normal workloads should leave it
+  unset.
 
 Open vector2 publication work:
 

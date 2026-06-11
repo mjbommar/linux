@@ -596,7 +596,7 @@ static bool um_vec2_open_fault_injected(struct net_device *dev,
 		return false;
 
 	netdev_info(dev,
-		    "vector v2 injected open failure at attempt %llu threshold %u\n",
+		    "vector v2 validation injected open failure at attempt %llu threshold %u\n",
 		    (unsigned long long)attempt, vdev->cfg.fail_open_after);
 	return true;
 }

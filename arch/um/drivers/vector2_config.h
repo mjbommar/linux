@@ -80,6 +80,7 @@ struct um_vec2_config {
 	unsigned int mtu;
 	unsigned int queues;
 	unsigned int coalesce_usecs;
+	/* Validation-only open failure injection. Zero disables it. */
 	unsigned int fail_open_after;
 
 	bool batching;

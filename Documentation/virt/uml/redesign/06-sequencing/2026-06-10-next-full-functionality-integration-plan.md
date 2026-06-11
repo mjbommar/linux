@@ -771,7 +771,10 @@ Required functionality:
 - Keep in-process trusted host validation green.
 - Keep launcher-owned fd handoff validated and decide whether per-take pool fd
   handoff is required or retired.
-- Confirm failure injection is test-only or clearly documented.
+- Confirm failure injection is test-only or clearly documented. Current
+  status: `fail_open_after=N` is runtime-available for the live open-unwind
+  gate, but documented as validation-only and not part of normal workload
+  configuration.
 - Align Kconfig wording with actual readiness.
 
 Publication rule:

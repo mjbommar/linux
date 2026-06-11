@@ -155,7 +155,8 @@ pub struct NetworkSection {
     /// Values above 1, and `auto`, require vector2.
     pub queues: NetworkQueueSpec,
     /// Optional vector2 fault-injection threshold for live open-unwind
-    /// validation. `N` fails the Nth and later netdev opens.
+    /// validation only. `N` fails the Nth and later netdev opens.
+    /// Leave unset for normal workloads.
     pub fail_open_after: Option<u32>,
     pub tap_name: String,
     pub guest_ip: String,

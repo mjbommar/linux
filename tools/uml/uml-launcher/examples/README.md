@@ -50,7 +50,7 @@ CLI flags > TOML > env vars > defaults.
 | [`vector2-auto-queues.toml`](vector2-auto-queues.toml) | Vector2 TAP smoke using `queues = "auto"` to match runtime.ncpus |
 | [`vector2-fastapi-smoke.toml`](vector2-fastapi-smoke.toml) | Vector2 FastAPI/uvicorn smoke using fd handoff and automatic queue sizing |
 | [`vector2-lifecycle-stress.toml`](vector2-lifecycle-stress.toml) | Vector2 live `ip link up/down` lifecycle stress with ethtool counter checks |
-| [`vector2-failed-open.toml`](vector2-failed-open.toml) | Vector2 live failed-open injection and open-unwind counter check |
+| [`vector2-failed-open.toml`](vector2-failed-open.toml) | Vector2 validation-only failed-open injection and open-unwind counter check |
 | [`cpython-test.toml`](cpython-test.toml) | CPython standard test suite — canonical "is the env real?" check |
 
 The Umlfile configs are not magic either: they're TOML that drives
@@ -94,6 +94,9 @@ UML_KERNEL=/path/to/uml/linux \
     --pass-marker VECTOR2_FAILED_OPEN_OK \
     --fail-marker 'VECTOR2_FAILED_OPEN_.*(FAIL|UNEXPECTED|MISSING|BAD)|VERIFY_FAIL|kernel BUG|Kernel panic|BUG:|WARNING:|KCSAN:|data-race'
 ```
+
+`[network].fail_open_after` is only for vector2 validation Umlfiles such
+as `vector2-failed-open.toml`; leave it unset for normal workloads.
 
 For a quick vec0-vs-vector2 guest-to-host TCP baseline through the
 same `umlctl` path, use the helper script:
