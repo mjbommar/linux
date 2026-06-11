@@ -247,6 +247,15 @@ This file is the live execution tracker for
   2026-06-11. Local privileged syscall-rate
   collection remains blocked by `perf_event_paranoid=4`, so this is bottleneck
   diagnostic support rather than P4.3 syscall-rate closure.
+- The first focused 1 MiB host-to-guest run with UML process metrics confirms
+  the small-transfer cell remains open. Four repeats each for legacy vector and
+  vector2 passed. Host-side MiB/s medians were legacy vector 0.9845 and vector2
+  0.9005, ratio 0.9147; best observed host-side rates were legacy vector 1.630
+  and vector2 1.085, ratio 0.6656. Median UML process scheduler pcount was
+  26547.5 for vector2 versus 2213.0 for legacy vector, and median voluntary
+  context switches were 26505.5 versus 2186.5, pointing the next bottleneck
+  pass at wakeup/readiness/receive scheduling rather than raw RX-slot
+  allocation alone.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:

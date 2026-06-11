@@ -705,6 +705,54 @@ This is useful for the 1 MiB host-to-guest bottleneck pass, but it does not
 replace the P4.3 syscall-rate gate.  On this host, unprivileged `perf stat -e
 syscalls:sys_enter_*` is blocked by `perf_event_paranoid=4`.
 
+## 1 MiB Host-To-Guest Metric Diagnostic: 2026-06-11
+
+The open 1 MiB host-to-guest cell was rerun with the new UML process metric
+columns:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g-1m-metrics
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g-1m-metrics \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=4 \
+UML_VECTOR_PERF_PORT=19170 \
+  timeout 1200s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Result: PASS for all eight rows.  The generated `summary.tsv` had 22 fields
+for the header and every row, and cleanup checks found no stale `vperf-*` TAP
+devices or live `umlctl` instances.
+
+Host-side MiB/s:
+
+| Driver | Values | Median | Best |
+| --- | --- | ---: | ---: |
+| vector | 1.630, 0.342, 1.602, 0.367 | 0.9845 | 1.630 |
+| vector2 | 0.909, 1.085, 0.892, 0.882 | 0.9005 | 1.085 |
+
+Vector2/legacy ratios:
+
+| Ratio | Value |
+| --- | ---: |
+| median host-side MiB/s | 0.9147 |
+| best host-side MiB/s | 0.6656 |
+
+Median UML host-process deltas:
+
+| Metric | vector | vector2 | vector2/vector |
+| --- | ---: | ---: | ---: |
+| system CPU seconds | 0.310 | 0.670 | 2.16 |
+| sched run seconds | 0.338087 | 0.817219 | 2.42 |
+| sched pcount delta | 2213.0 | 26547.5 | 12.00 |
+| voluntary context switches | 2186.5 | 26505.5 | 12.12 |
+
+This does not close the host-to-guest no-regression bar.  It does narrow the
+next bottleneck pass: vector2 is steadier than legacy vector in this short run,
+but it spends much more scheduler/wakeup activity per transfer.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
@@ -729,6 +777,9 @@ The full replacement performance gate still needs:
 - host-to-guest small-transfer follow-up;
 - use the fixed-byte harness diagnostics to compare RX IRQ, NAPI, and batch
   counters plus UML process metric deltas between legacy and vector2;
+- inspect host-to-guest wakeup/readiness/receive scheduling behavior, because
+  the 1 MiB metric diagnostic shows about 12x higher vector2 scheduler pcount
+  and voluntary context-switch deltas;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - full CPU-utilisation and CPU cycles per packet if practical;

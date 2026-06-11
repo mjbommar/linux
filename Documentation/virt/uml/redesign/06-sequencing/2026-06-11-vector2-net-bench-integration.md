@@ -263,5 +263,8 @@ syscall-rate, full CPU-utilisation, and longer multiqueue fairness profiles,
 plus the natural long-run and KVM-v2 Tier 3 networking gates.  The fixed-byte
 helper now has per-process endpoint CPU columns plus host-to-guest UML process
 metric deltas for focused diagnostics, but those columns do not replace the
-full CPU/syscall acceptance gate.  Until those runs pass, vector2 remains
-opt-in and not a replacement for legacy vector.
+full CPU/syscall acceptance gate.  The first 1 MiB host-to-guest run with the
+new deltas keeps that cell open: vector2/legacy host-side median ratio is
+0.9147 and best ratio is 0.6656, with about 12x higher vector2 scheduler
+pcount/context-switch deltas.  Until those runs pass, vector2 remains opt-in
+and not a replacement for legacy vector.
