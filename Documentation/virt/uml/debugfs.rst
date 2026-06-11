@@ -209,9 +209,13 @@ closed instead of escaping the log. Replay mode also asks KVM to block
 ``SIGALRM`` while the vCPU is inside ``KVM_RUN`` so timer delivery cannot
 create an unrecorded in-guest ``EINTR`` point; pending UML timer work is
 handled after the VM exit. Workloads that require precise asynchronous signal
-delivery remain outside the current R/R-1 contract. Full deterministic replay
-still needs broader payload coverage plus device and randomness policy
-described in the redesign plan. The current in-memory event format is
+delivery remain outside the current R/R-1 contract. Strict replay also rejects
+randomness and external I/O syscalls outside the supported subset, including
+``getrandom(2)`` and representative ``openat(2)``, ``read(2)``, ``write(2)``,
+and ``ioctl(2)`` paths, instead of replaying them as scalar-only entries. Full
+deterministic replay still needs broader payload coverage plus replayable
+device, network, and hostfs policies described in the redesign plan. The
+current in-memory event format is
 versioned and
 debugfs reports its header size, total fixed entry size, and maximum
 variable payload length so validation tools can reject stale logs instead of

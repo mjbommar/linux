@@ -67,9 +67,12 @@ Current source-tree direction:
   sets CR4.TSD so user `RDTSC`/`RDTSCP` faults instead of observing host time
   outside the log. Replay mode also blocks `SIGALRM` in KVM's per-vCPU signal
   mask while inside `KVM_RUN`, preventing timer delivery from creating
-  unrecorded in-guest `EINTR` points. Broader payload coverage, replayable
-  signal-event ordering, device, and deterministic replay policy remain
-  incomplete.
+  unrecorded in-guest `EINTR` points. Strict replay also rejects randomness
+  and external I/O syscalls outside the supported subset, including
+  `getrandom`, `openat`, `read`, `write`, and `ioctl`, instead of replaying
+  them as scalar-only entries. Broader payload coverage, replayable
+  signal-event ordering, device/network/hostfs event replay, and deterministic
+  replay policy remain incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -144,18 +147,19 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 20/20 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 21/21 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
   version/flags/header contract checks, bad-format replay rejection with cursor
   preservation, divergence cursor preservation, `uname(2)` and `getcwd(2)`
   payload restore, too-small payload buffer rejection, payload argument
   mismatch, payload overflow accounting, strict replay syscall-policy coverage,
-  strict raw-time syscall rejection, strict-on/strict-off gate behavior, strict
-  replay failure accounting, time-travel clock-event FIFO replay, the synthetic
-  gadget-bypass page helper, and snapshot metadata cleanup. The live KVM
-  syscall dispatcher now calls the observe/consume hooks, so this is no longer
-  core-only syscall plumbing.
+  strict raw-time syscall rejection, strict external-I/O/randomness syscall
+  rejection, strict-on/strict-off gate behavior, strict replay failure
+  accounting, time-travel clock-event FIFO replay, the synthetic gadget-bypass
+  page helper, and snapshot metadata cleanup. The live KVM syscall dispatcher
+  now calls the observe/consume hooks, so this is no longer core-only syscall
+  plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
   record start, and records 3067 live KVM v2 syscall entries with 294432
@@ -525,8 +529,10 @@ scalar-only entries. Raw time syscalls are fail-closed, and replay mode sets
 CR4.TSD so user `RDTSC`/`RDTSCP` faults. Replay mode blocks `SIGALRM` at the
 KVM vCPU signal mask while inside `KVM_RUN`, so timer delivery is deferred to
 the post-exit UML signal path rather than becoming an unrecorded in-guest
-interruption point. Replayable raw-time payloads, explicit signal-event
-ordering, and workload-level replay smokes remain open.
+interruption point. Randomness and external I/O syscalls outside the supported
+subset are also fail-closed in strict replay. Replayable raw-time payloads,
+explicit signal-event ordering, replayable device/network/hostfs events, and
+workload-level replay smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

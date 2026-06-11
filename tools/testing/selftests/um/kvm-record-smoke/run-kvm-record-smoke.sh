@@ -88,6 +88,7 @@ CASES=(
 	"test_record_strict_replay_failure_is_counted"
 	"test_record_strict_syscall_gate"
 	"test_record_strict_time_policy"
+	"test_record_strict_external_io_policy"
 	"test_record_time_travel_fifo"
 	"test_record_buffer_overflow_is_counted"
 	"test_record_reset_releases_snapshot"

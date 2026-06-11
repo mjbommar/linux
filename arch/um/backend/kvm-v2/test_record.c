@@ -640,6 +640,54 @@ static void test_record_strict_time_policy(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void expect_strict_rejects_syscall(struct kunit *test,
+					  struct kvm_v2_record *rec,
+					  unsigned long syscall_nr,
+					  unsigned long *rejected)
+{
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_has_payload(syscall_nr));
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_supported(syscall_nr));
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_check_strict_syscall(rec, syscall_nr),
+			-EOPNOTSUPP);
+	(*rejected)++;
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, *rejected);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall,
+			(long)syscall_nr);
+}
+
+static void test_record_strict_external_io_policy(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	unsigned long rejected = 0;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+#ifdef __NR_getrandom
+	expect_strict_rejects_syscall(test, rec, __NR_getrandom, &rejected);
+#endif
+#ifdef __NR_openat
+	expect_strict_rejects_syscall(test, rec, __NR_openat, &rejected);
+#endif
+#ifdef __NR_read
+	expect_strict_rejects_syscall(test, rec, __NR_read, &rejected);
+#endif
+#ifdef __NR_write
+	expect_strict_rejects_syscall(test, rec, __NR_write, &rejected);
+#endif
+#ifdef __NR_ioctl
+	expect_strict_rejects_syscall(test, rec, __NR_ioctl, &rejected);
+#endif
+
+	KUNIT_EXPECT_GT(test, rejected, 0UL);
+	kvm_v2_record_destroy(rec);
+}
+
 static void test_record_time_travel_fifo(struct kunit *test)
 {
 	static const u64 ns_values[] = {
@@ -766,6 +814,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_strict_replay_failure_is_counted),
 	KUNIT_CASE(test_record_strict_syscall_gate),
 	KUNIT_CASE(test_record_strict_time_policy),
+	KUNIT_CASE(test_record_strict_external_io_policy),
 	KUNIT_CASE(test_record_time_travel_fifo),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
 	KUNIT_CASE(test_record_reset_releases_snapshot),
