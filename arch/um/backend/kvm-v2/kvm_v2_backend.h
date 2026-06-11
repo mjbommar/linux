@@ -762,6 +762,10 @@ struct kvm_v2_record {
 	u64				entries_replayed;
 	u64				entries_dropped;
 	u64				syscall_count;
+	pid_t				first_syscall_pid;
+	pid_t				last_syscall_pid;
+	u64				syscalls_from_snapshot_task;
+	u64				syscalls_from_other_tasks;
 	struct mutex			lock;
 };
 

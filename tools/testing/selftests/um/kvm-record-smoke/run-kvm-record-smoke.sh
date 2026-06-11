@@ -3,10 +3,12 @@
 #
 # Host-side smoke for the experimental KVM v2 record/replay core.
 #
-# The first half boots the KUnit suite for the in-memory state machine and
-# FIFO replay primitive. The second half boots a guest script that drives the
-# debugfs control surface and verifies that a real KVM v2 workload records
-# syscall entries.
+# The first leg boots the KUnit suite for the in-memory state machine and FIFO
+# replay primitive. The second boots a guest script that drives the debugfs
+# control surface and verifies that a real KVM v2 workload records syscall
+# entries. The final leg boots a static helper that starts recording from the
+# same task that runs the scalar workload, then checks the record ownership
+# counters.
 
 set -u
 
@@ -14,6 +16,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 BINARY=${UML_BINARY:-./linux}
 MEM=${UML_MEM:-256M}
 GUEST_SCRIPT="$DIR/kvm-record-smoke.sh"
+TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -22,6 +25,10 @@ fi
 if [ ! -x "$GUEST_SCRIPT" ]; then
 	echo "FAIL: $GUEST_SCRIPT not executable" >&2
 	exit 1
+fi
+if [ ! -x "$TASK_HELPER" ]; then
+	echo "SKIP: $TASK_HELPER not built; run 'make' in this dir" >&2
+	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
 	echo "SKIP: /dev/kvm not present" >&2
@@ -122,8 +129,40 @@ fi
 
 echo "$LINE"
 case "$LINE" in
+*PASS*) ;;
+*FAIL*)
+	exit 1
+	;;
+*)
+	exit 1
+	;;
+esac
+
+if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before task-owned smoke" >&2
+	exit 4
+fi
+
+TASK_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$TASK_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+TASK_LINE=$(echo "$TASK_OUT" | grep '^KVM_RECORD_TASK:' | head -1)
+if [ -z "$TASK_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no task-owned smoke result line)"
+	echo "$TASK_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TASK|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$TASK_LINE"
+case "$TASK_LINE" in
 *PASS*)
-	echo "KVM_RECORD_SMOKE: PASS (${#CASES[@]}/${#CASES[@]} KUnit cases + live debugfs record)"
+	echo "KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]} live-debugfs=1 task-owned=1)"
 	exit 0
 	;;
 *FAIL*)

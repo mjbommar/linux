@@ -10,6 +10,7 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/jump_label.h>
+#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
@@ -158,6 +159,10 @@ static void test_record_observe_syscall(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, rec->buffer_used, sizeof(*entry));
 	KUNIT_EXPECT_EQ(test, rec->entries_recorded, 1ULL);
 	KUNIT_EXPECT_EQ(test, rec->syscall_count, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->first_syscall_pid, current->pid);
+	KUNIT_EXPECT_EQ(test, rec->last_syscall_pid, current->pid);
+	KUNIT_EXPECT_EQ(test, rec->syscalls_from_snapshot_task, 0ULL);
+	KUNIT_EXPECT_EQ(test, rec->syscalls_from_other_tasks, 0ULL);
 
 	entry = rec->buffer;
 	KUNIT_EXPECT_EQ(test, entry->kind, (u32)KVM_V2_REPLAY_SYSCALL);

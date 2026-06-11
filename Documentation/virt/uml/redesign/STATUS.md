@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, and current-HEAD vector2 validation evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, and record/replay task-owned session-start evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -54,8 +54,11 @@ Current source-tree direction:
   start/stop/reset a singleton record container for validation. Debugfs record
   start also captures and attaches a KVM v2 task snapshot. The record log can
   also round-trip UML time-travel clock advances through the `record_replay`
-  hook. Raw time/RDTSC, signal, device, and deterministic replay policy remain
-  incomplete.
+  hook. Record status now reports first/last recorded syscall PID and
+  same-task versus other-task syscall counters, and the task-owned smoke proves
+  a single process can snapshot itself and record a focused scalar syscall
+  workload without other-task contamination. Raw time/RDTSC, payload replay,
+  signal, device, and deterministic replay policy remain incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -141,6 +144,12 @@ The strongest current KVM v2 evidence is:
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
   record start, and records 3067 live KVM v2 syscall entries with 245360
   bytes used and 0 drops.
+- Experimental task-owned record smoke: the static `kvm-record-task` helper
+  runs as a single guest process, writes the debugfs `start` command itself,
+  verifies `snapshot_source_pid == first_syscall_pid == last_syscall_pid`,
+  and requires `syscalls_from_other_tasks=0` for the scalar workload. This
+  closes the first R/R-1 session-start gate but does not yet prove payload
+  replay or full deterministic workload replay.
 - Experimental record clock bench: `kvm-record-clock-bench` passes with
   `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
   KVM v2 record log can round-trip time-travel clock advances.

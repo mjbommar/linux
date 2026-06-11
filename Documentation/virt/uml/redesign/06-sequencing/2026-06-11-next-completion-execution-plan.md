@@ -46,6 +46,11 @@ Current execution evidence added on 2026-06-11:
   `kvm-record-smoke` reported 3067 live syscall entries, 245360 bytes used,
   and 0 drops, and `kvm-record-clock-bench` reported `N=100`,
   `observed=100`, `replayed=100`, and `mismatches=0`; and
+- added the first R/R-1 task-owned session-start gate: record status now
+  reports first/last syscall PID and same-task versus other-task syscall
+  counters, and `kvm-record-smoke` includes a static helper that snapshots
+  itself, records a scalar workload, and requires `same=syscall_count` with
+  `other=0`; and
 - the pool/fork, CPython, vector2, KMSAN, and record/replay evidence is
   current focused evidence, not a substitute for the final post-record/replay/
   vector2 validation matrix.
@@ -285,7 +290,7 @@ vector2, pool, profile, and cleanup gates should run after that work settles.
 | Slice | Target | Implementation outcome | Required validation before commit |
 | --- | --- | --- | --- |
 | S0 | Plan and baseline refresh | This file records the current branch, closed KMSAN blocker, live record/replay evidence, and remaining order of work. | `git diff --check`; pushed docs-only commit. |
-| S1 | Record/replay tier definition and ABI | Define the first supported replay tier in docs and code comments; keep the public support label experimental until the deterministic workload gate passes. Close the debugfs-control-writer ambiguity by adding a task-scoped runner or test harness that records the task that actually executes the workload. | Record KUnit; live record smoke; shell syntax for new selftests. |
+| S1 | Record/replay tier definition and ABI | First task-owned session-start gate is implemented: the record status reports syscall ownership counters, and the task helper proves a single process can snapshot itself and keep the scalar workload on that task. Keep the public support label experimental until payload, time, signal/device policy, and deterministic replay gates pass. | Current status: `kvm-record-smoke` PASS with `KVM_RECORD_TASK: PASS pid=1 entries=396 syscalls=396 same=396 other=0`; clock bench PASS. |
 | S2 | Record/replay syscall payload model | Extend the record entries or add side records for the selected syscall subset so replay can restore user-visible payloads, not just return values. Strict replay must compare syscall number, arguments relevant to the selected tier, return value, and payload lengths. | Record KUnit covering payload copyout, truncation, overflow, mismatch, and cursor preservation. |
 | S3 | Record/replay time, signal, and device policy | Implement the selected tier's deterministic policy for time, vvar/RDTSC, SIGALRM/signal delivery, randomness, and device I/O. Unsupported operations must fail closed in strict replay instead of silently becoming best-effort. | Clock bench; deterministic workload replay; targeted negative tests for unsupported operations. |
 | S4 | Record/replay user-facing documentation | Update debugfs, Kconfig help, selftest README, and live inventory so users know the exact supported tier, limitations, and experimental status. | Documentation grep for stale stronger claims; `git diff --check`. |

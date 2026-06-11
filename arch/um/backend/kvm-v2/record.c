@@ -17,6 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -98,6 +99,10 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->entries_replayed = 0;
 	rec->entries_dropped = 0;
 	rec->syscall_count = 0;
+	rec->first_syscall_pid = 0;
+	rec->last_syscall_pid = 0;
+	rec->syscalls_from_snapshot_task = 0;
+	rec->syscalls_from_other_tasks = 0;
 }
 
 static void kvm_v2_record_release_snapshot_locked(struct kvm_v2_record *rec)
@@ -449,6 +454,14 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 	rec->buffer_used += need;
 	rec->entries_recorded++;
 	rec->syscall_count++;
+	if (!rec->first_syscall_pid)
+		rec->first_syscall_pid = current->pid;
+	rec->last_syscall_pid = current->pid;
+	if (rec->snapshot_valid && rec->snapshot &&
+	    current->pid == rec->snapshot->task_source_pid)
+		rec->syscalls_from_snapshot_task++;
+	else if (rec->snapshot_valid)
+		rec->syscalls_from_other_tasks++;
 
 out_unlock:
 	mutex_unlock(&rec->lock);
@@ -882,6 +895,12 @@ static int kvm_v2_record_status_show(struct seq_file *m, void *v)
 	seq_printf(m, "entries_replayed: %llu\n", rec->entries_replayed);
 	seq_printf(m, "entries_dropped: %llu\n", rec->entries_dropped);
 	seq_printf(m, "syscall_count: %llu\n", rec->syscall_count);
+	seq_printf(m, "first_syscall_pid: %d\n", rec->first_syscall_pid);
+	seq_printf(m, "last_syscall_pid: %d\n", rec->last_syscall_pid);
+	seq_printf(m, "syscalls_from_snapshot_task: %llu\n",
+		   rec->syscalls_from_snapshot_task);
+	seq_printf(m, "syscalls_from_other_tasks: %llu\n",
+		   rec->syscalls_from_other_tasks);
 	mutex_unlock(&rec->lock);
 	mutex_unlock(&kvm_v2_record_debugfs_lock);
 
