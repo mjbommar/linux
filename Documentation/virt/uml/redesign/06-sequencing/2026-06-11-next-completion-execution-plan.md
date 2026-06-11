@@ -6,18 +6,21 @@ Branch target: `next`
 
 Functional code baseline used for this plan refresh:
 
-- `next`: `cb7ee7d69471`
-- `origin/next`: `cb7ee7d69471`
+- `next`: `4843ca214ee2`
+- `origin/next`: `4843ca214ee2`
 - `torvalds/master`: `9716c086c8e8`
-- `torvalds/master...next`: `0` commits behind, `147` commits ahead
-- upstream ancestry: `torvalds/master` is an ancestor of `next`
-- worktree state: clean at this plan refresh (`## next...origin/next`)
+- latest fetched Linus ref for this refresh: `FETCH_HEAD=9716c086c8e8`
+- `FETCH_HEAD...next`: `0` commits behind, `153` commits ahead
+- upstream ancestry: the fetched Linus ref is an ancestor of `next`
+- branch state before this plan/tooling refresh: `next` matched `origin/next`
 - note: this is the functional code baseline; documentation-only plan refresh
   commits may sit above it.
 
 Current execution evidence added on 2026-06-11:
 
-- refreshed this plan after the branch reached `cb7ee7d69471`;
+- refreshed this plan after the branch reached `4843ca214ee2` and a fresh
+  fetch of Linus' `master` confirmed `9716c086c8e8` as the upstream base used
+  for the comparison above;
 - cleaned KVM v2 state comments and x86 UML ptrace TLS register handling in
   active source;
 - tightened the substrate gate and recorded CPython tier-0 evidence through
@@ -132,7 +135,11 @@ Current execution evidence added on 2026-06-11:
   reduces representative 1 MiB host-to-guest RX-slot churn from 32448 prepared
   / 906 received / 31542 released slots to about 1410 prepared / 905 received
   / 505 released slots, but the focused host-to-guest 1 MiB best ratio is only
-  0.594, so the small-transfer blocker remains open.
+  0.594, so the small-transfer blocker remains open; and
+- extended the fixed-byte TCP diagnostic harness with knobs for vector2 host
+  mode, active-sender `TCP_NODELAY`, and host/guest sender chunk size so the
+  remaining 1 MiB host-to-guest blocker can be reproduced without ad hoc
+  script edits.
 
 This file is now the plan of record for completing, importing, or explicitly
 retiring all original UML v2 functionality on `next`.
@@ -218,6 +225,25 @@ Treat these as input, not automatically-current truth:
 The conflict rule is simple: current implementation and fresh validation on
 `next` override old plans, reports, presentations, and branch notes.
 
+## Original Mission Coverage Map
+
+This table ties the original `00-vision.md` goals and the archived
+report/presentation claims to the remaining completion work. It is the guard
+against declaring success because a feature appears in old notes while the
+current `next` branch still lacks code, tests, or accurate documentation.
+
+| Original mission item | Current `next` posture | What must happen before 100% completion |
+| --- | --- | --- |
+| KVM backend with low syscall overhead | KVM v2 core, syscall dispatch, LSTAR gadget, fallback path, XSAVE/FPU hardening, dynamic-loader/TLS fix, and focused CPython/substrate evidence are present. | Broaden dynamic-userspace and Tier 3 workload evidence on the final tree, keep KUnit and failure-policy gates green, and record the final upstream-ready performance envelope. |
+| Full instrumentation: KASAN, KMSAN, KCSAN, KFENCE, KCOV, kprobes, ftrace, BPF JIT, KGDB | KASAN, KMSAN, KCSAN, KFENCE, KCOV, kprobes, ftrace, and BPF/JIT have focused build/runtime evidence. KGDB is explicitly deferred-not-present. | Rerun the full profile/instrumentation matrix after final KVM/vector2 changes. Keep KGDB out of completion unless it is implemented with UML architecture support, backend register access, transport support, and a smoke test. |
+| Deterministic time-travel and record/replay as first-class | Experimental Kconfig-gated R/R-1 exists with task-owned snapshot start, scalar replay, `uname(2)`/`getcwd(2)` payload replay, time-travel clock events, strict fail-closed unsupported syscall policy, raw-time/RDTSC blocking, SIGALRM blocking during replay, and device/randomness rejection. | Either finish and document R/R-1 as the supported first tier, or explicitly exclude record/replay from the final completion claim with approval. Broader payload, supported-entry mismatch, signal-event ordering, and device/network/hostfs policy remain the main gaps. |
+| Snapshot/forkserver startup below the intended fuzzing threshold | Snapshot capture/restore/ELF export, template pause, fork-on-resume, pool serve/take, daemon exec, warm members, pool benchmark, and syzkaller shim have current focused evidence. | Rerun the full pool/fork/syzkaller gate on the final KVM/vector2 stack and decide whether snapshot-backed fork-server is completed, deferred, or retired. |
+| Explicit research/fuzz/sandbox/production/library/embedded/time-travel profiles | Kernel profile fragments and `umlbuild` profiles exist; several profile-specific runtime probes have passed. | Build every kernel profile from a clean tree, run matching runtime probes, rerun KMSAN, and ensure launcher profiles do not drift from Kconfig profiles. |
+| Runtime-flippable hooks and observability | KVM tracepoints, debugfs status/control surfaces, profile hooks, launcher gates, and transparency tooling exist. Private KVM state trace remains historical-only. | Keep public observability on normal kernel trace/debugfs surfaces. Reintroduce private state trace only if redesigned as optional diagnostics with tests. |
+| Backend abstraction: ptrace, seccomp, and KVM as swappable trap mechanisms | Seccomp remains the fallback backend and KVM v2 is selectable; ptrace-era code has been cleaned or bounded where touched. | Keep backend selection explicit, preserve seccomp comparison gates, and avoid stale docs implying unsupported automatic backend behavior. |
+| `vm/uml` syzkaller backend | The launcher-side shim and syzkaller-style pool take/exec/port-forward/status/destroy path have focused smoke evidence. | Rerun after final pool/vector2/KVM changes and keep the shim tied to the supported `exec/1` JSON/NDJSON ABI unless an `exec/2` ABI is deliberately implemented. |
+| ARM64 and RISC-V host buildability | Original mission goal remains outside the current x86_64-centered validation evidence. | Do not claim this as complete without real host-build evidence or an explicit deferral note. |
+
 ## All-Functionality Closure Model
 
 Every original or historical feature must move through this closure model
@@ -268,7 +294,7 @@ Current surface relative to `torvalds/master` at this plan refresh:
 | `redesign/upstream-patches/` | 26 | 26 | Regenerate after final branch shape; do not treat old cover letters as current. |
 
 The changed active/review surface across source, selftests, launcher, and UML
-docs is about 1,096 files. The practical cleanup target is
+docs is about 1,054 files. The practical cleanup target is
 not "rewrite every historical markdown file." The target is:
 
 - every active source file and selftest touched by UML v2;
@@ -361,13 +387,14 @@ they are implemented and validated, or explicitly retired with approval.
 
 ## Execution Slice Plan From Current Head
 
-The plan from `cb7ee7d69471` is to finish one high-risk surface at a time and
+The plan from `4843ca214ee2` is to finish one high-risk surface at a time and
 push after each validated slice. The ordering is intentional: record/replay
 changes can affect KVM syscall dispatch and time/signal handling, while vector2
 publication still depends on long-run and performance/fairness evidence. The
-measured guest-to-host TCP blocker is now closed by the TX/RX NAPI scheduling
-slice, so the remaining vector2 work should expand the publication matrix and
-then rerun the record/replay, pool, profile, and cleanup gates after that
+measured guest-to-host TCP blocker is now closed and protected by the lazy-RX
+cleanup, so the remaining vector2 work should focus first on the reproducible
+1 MiB host-to-guest fixed-byte regression, then expand the publication matrix
+and rerun the record/replay, pool, profile, and cleanup gates after that
 surface settles.
 
 | Slice | Target | Implementation outcome | Required validation before commit |
@@ -822,7 +849,7 @@ The final completion note must include:
 | W2 | Snapshot capture/restore/ELF export | Substantially closed | Yes | Keep current KUnit/live export/restore smokes green after later changes. |
 | W3 | Record/replay completion or explicit experimental exclusion | Open | Yes | Supported replay tier passes, or exclusion is approved and documented. |
 | W4 | Fork-server, pool, daemon exec, and syzkaller path | Mostly closed | Yes | Full pool/syzkaller smoke set passes on final KVM/vector2 stack. |
-| W5 | Vector2 publication readiness | Open, measured TCP blocker | Yes | TCP net-bench reaches the selected publication gate, then seccomp and KVM v2 Tier 3 gates plus multiqueue/fairness evidence pass. |
+| W5 | Vector2 publication readiness | Open, host-to-guest small-transfer blocker | Yes | Normal TCP net-bench stays above the selected publication gate, the 1 MiB host-to-guest gap is fixed or explicitly bounded, and seccomp/KVM v2 Tier 3 plus multiqueue/fairness evidence pass. |
 | W6 | Profiles and instrumentation | Open | Yes | All profile builds and runtime probes pass, including KMSAN rerun and KGDB disposition. |
 | W7 | Active code/comment/doc cleanup | Open continuous | Yes | Focused scans reviewed and active surfaces are free of random history. |
 | W8 | Upstream queue refresh | Open | No for local completion, yes for publication | Submission queue and patch boundaries regenerated from final `next`. |
@@ -850,14 +877,14 @@ detour:
    `torvalds/master...next` count before making claims about upstream currency.
 2. Preserve the fixed vector2 TCP guest-to-host gate on the final stack. The
    harness, scatter-gather TX fix, diagnostics, and TX/RX NAPI scheduling fix
-   are landed; the latest normal gate ratio is 0.926 against the 0.85 bar.
-   Rerun it after later vector2/KVM changes and extend the matrix to
+   are landed; lazy RX keeps the latest normal gate green at 0.993 against the
+   0.85 bar. Rerun it after later vector2/KVM changes and extend the matrix to
    host-to-guest small-transfer, UDP, syscall-rate, and CPU-utilisation
    evidence.
-3. Finish vector2 publication evidence after the TCP gate is fixed or
-   explicitly re-scoped: natural 7200-second seccomp Tier 3, full KVM-v2 Tier 3
-   networking coverage, and multiqueue fairness/performance. Keep v2 opt-in
-   until those gates justify stronger language.
+3. Finish vector2 publication evidence after the 1 MiB host-to-guest
+   fixed-byte gap is fixed or explicitly bounded: natural 7200-second seccomp
+   Tier 3, full KVM-v2 Tier 3 networking coverage, and multiqueue fairness/
+   performance. Keep v2 opt-in until those gates justify stronger language.
 4. Finish the remaining R/R-1 record/replay closure. Task-owned session start,
    the first `uname(2)`/`getcwd(2)` payload models, strict unsupported syscall
    rejection, raw-time fail-closed replay policy, versioned in-memory event

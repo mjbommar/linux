@@ -22,7 +22,11 @@ Environment overrides:
   UML_VECTOR_PERF_REPEAT     repetitions per driver/direction/size, default: 1
   UML_VECTOR_PERF_PORT       host TCP sink port, default: 19091
   UML_VECTOR_PERF_BACKEND    umlctl backend, default: seccomp
+  UML_VECTOR_PERF_HOST_MODE  vector2 host mode: auto, fd, or inproc; default: auto
   UML_VECTOR_PERF_QUEUES     vector2 queue intent, default: auto
+  UML_VECTOR_PERF_TCP_NODELAY set TCP_NODELAY on active TCP sender, default: 0
+  UML_VECTOR_PERF_HOST_CHUNK host sender chunk size, default: 65536
+  UML_VECTOR_PERF_GUEST_CHUNK guest sender chunk size, default: 65536
   UML_VECTOR_PERF_OUT        output directory, default: /tmp/um-vector-perf-baseline
 EOF
 }
@@ -36,7 +40,11 @@ bytes_list="${UML_VECTOR_PERF_BYTES_LIST:-}"
 repeat="${UML_VECTOR_PERF_REPEAT:-1}"
 port="${UML_VECTOR_PERF_PORT:-19091}"
 backend="${UML_VECTOR_PERF_BACKEND:-seccomp}"
+host_mode="${UML_VECTOR_PERF_HOST_MODE:-auto}"
 queues="${UML_VECTOR_PERF_QUEUES:-auto}"
+tcp_nodelay="${UML_VECTOR_PERF_TCP_NODELAY:-0}"
+host_chunk="${UML_VECTOR_PERF_HOST_CHUNK:-65536}"
+guest_chunk="${UML_VECTOR_PERF_GUEST_CHUNK:-65536}"
 out="${UML_VECTOR_PERF_OUT:-/tmp/um-vector-perf-baseline}"
 
 while [[ $# -gt 0 ]]; do
@@ -101,8 +109,28 @@ guest-to-host|host-to-guest|both)
 	exit 2
 	;;
 esac
+case "$host_mode" in
+auto|fd|inproc)
+	;;
+*)
+	echo "host mode must be auto, fd, or inproc (got $host_mode)" >&2
+	exit 2
+	;;
+esac
 if [[ "$repeat" == '' || "$repeat" == *[!0-9]* || "$repeat" -lt 1 ]]; then
 	echo "repeat must be a positive integer (got $repeat)" >&2
+	exit 2
+fi
+if [[ "$tcp_nodelay" != "0" && "$tcp_nodelay" != "1" ]]; then
+	echo "TCP_NODELAY must be 0 or 1 (got $tcp_nodelay)" >&2
+	exit 2
+fi
+if [[ "$host_chunk" == '' || "$host_chunk" == *[!0-9]* || "$host_chunk" -lt 1 ]]; then
+	echo "host chunk size must be a positive integer (got $host_chunk)" >&2
+	exit 2
+fi
+if [[ "$guest_chunk" == '' || "$guest_chunk" == *[!0-9]* || "$guest_chunk" -lt 1 ]]; then
+	echo "guest chunk size must be a positive integer (got $guest_chunk)" >&2
 	exit 2
 fi
 
@@ -201,7 +229,7 @@ host_send() {
 	local host_log="$2"
 	local run_bytes="$3"
 
-	python3 -u - "$guest_ip" "$port" "$run_bytes" >"$host_log" 2>&1 <<'PY'
+	python3 -u - "$guest_ip" "$port" "$run_bytes" "$tcp_nodelay" "$host_chunk" >"$host_log" 2>&1 <<'PY'
 import socket
 import sys
 import time
@@ -209,11 +237,14 @@ import time
 host = sys.argv[1]
 port = int(sys.argv[2])
 total = int(sys.argv[3])
-chunk = bytes(65536)
+nodelay = int(sys.argv[4])
+chunk = bytes(int(sys.argv[5]))
 sent = 0
 
 start = time.monotonic()
 with socket.create_connection((host, port), timeout=20) as sock:
+    if nodelay:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     while sent < total:
         n = min(len(chunk), total - sent)
         sock.sendall(chunk[:n])
@@ -273,10 +304,13 @@ import time
 host = sys.argv[1]
 port = int(sys.argv[2])
 total = int(sys.argv[3])
-chunk = bytes(65536)
+nodelay = int(os.environ.get("UML_VECTOR_PERF_TCP_NODELAY", "0"))
+chunk = bytes(int(os.environ.get("UML_VECTOR_PERF_GUEST_CHUNK", "65536")))
 sent = 0
 start = time.monotonic()
 with socket.create_connection((host, port), timeout=20) as sock:
+    if nodelay:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     while sent < total:
         n = min(len(chunk), total - sent)
         sock.sendall(chunk[:n])
@@ -433,7 +467,7 @@ ncpus = 4
 [network]
 mode = "tap"
 driver = "$driver"
-host_mode = "auto"
+host_mode = "$host_mode"
 $(queue_toml "$driver")
 tap_name = "$tap"
 guest_ip = "10.93.0.2/24"
@@ -448,6 +482,8 @@ PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
 UML_VECTOR_PERF_BYTES = "$run_bytes"
 UML_VECTOR_PERF_REPEAT = "$repeat_idx"
 UML_VECTOR_PERF_PORT = "$port"
+UML_VECTOR_PERF_TCP_NODELAY = "$tcp_nodelay"
+UML_VECTOR_PERF_GUEST_CHUNK = "$guest_chunk"
 
 [[init.phases]]
 name = "network-metadata"
