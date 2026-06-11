@@ -53,7 +53,11 @@ else
 
 START := 0x60000000
 
-KBUILD_CFLAGS += -fno-builtin -m64 
+KBUILD_CFLAGS += -fno-builtin -m64
+
+ifdef CONFIG_KMSAN
+KBUILD_CFLAGS += -fbuiltin
+endif
 
 CHECKFLAGS  += -m64 -D__x86_64__
 KBUILD_AFLAGS += -m64

@@ -332,6 +332,66 @@ This closes the UMID host-helper false positive, but KMSAN remains open as a
 runtime blocker until the `vsnprintf()` / `console_on_rootfs()` report stream is
 closed and the smoke reaches a result marker.
 
+## Current-Head Compiler Builtin and Printk Cleanup
+
+The next current-head pass found two narrower false-positive sources before the
+remaining host-boundary failure:
+
+- `kernel/printk/internal.h` initialized `struct console_flush_type` through a
+  raw `memset()`. Replacing that with an empty struct assignment gives KMSAN
+  normal instrumented stores for the four boolean fields.
+- UML/x86_64 normally adds `-fno-builtin` to `KBUILD_CFLAGS`. Generic KMSAN
+  expects Clang to lower memory intrinsics to `__msan_memcpy()`,
+  `__msan_memmove()`, and `__msan_memset()`. Under `-fno-builtin`, explicit
+  `memset()` calls such as `drivers/char/random.c::crng_fast_key_erasure()`
+  remained raw calls into x86's `memset_64.o`, so KMSAN did not see initialized
+  bytes. UML now appends `-fbuiltin` only when `CONFIG_KMSAN=y`, preserving the
+  normal UML build while restoring KMSAN's compiler lowering contract.
+
+Validation:
+
+```bash
+make ARCH=um -j"$(nproc)" linux
+
+make -C "$src" ARCH=um LLVM=1 O="$out" uml/research-kmsan
+make -C "$src" ARCH=um LLVM=1 O="$out" -j"$(nproc)" linux
+UML_BINARY="$out/linux" UML_MEM=2048M \
+	"$src/tools/testing/selftests/um/kmsan-smoke/run-kmsan-smoke.sh"
+```
+
+Results:
+
+- normal UML build passed;
+- clean `research-kmsan` LLVM build passed with `CONFIG_CC_IS_CLANG=y`,
+  `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_KMSAN=y`, and
+  `CONFIG_KMSAN_CHECK_PARAM_RETVAL=y`;
+- object inspection confirmed `drivers/char/random.o` and `lib/radix-tree.o`
+  no longer reference raw `memset`;
+- `kmsan-smoke` still failed before the `KMSAN_SMOKE` marker;
+- the earlier printk `ft`, random/chacha, radix-tree, workqueue, and kthread
+  report stream moved away;
+- the first repeated landed-head report is now:
+
+```text
+BUG: KMSAN: uninit-value in vsnprintf+0x17cc/0x1c80
+...
+os_add_epoll_fd+0x102/0x120
+um_request_irq+0x88a/0xcb0
+line_setup_irq+0xce/0x2e0
+console_on_rootfs+0x45/0x17d
+kernel_init_freeable+0x170/0x3ee
+```
+
+`arch/um/os-Linux` is intentionally non-instrumented because it includes host
+headers and calls libc. This landed state therefore points at the next cleanup
+class: non-instrumented UML host helpers must not pass host-owned strings or
+stale KMSAN parameter metadata directly into instrumented kernel formatting
+paths. A temporary experiment that avoided the `strerror()` string and cleared
+the KMSAN context before the `os_add_epoll_fd()` printk advanced the smoke into
+hostfs inode/stat metadata reports, then a KMSAN metadata panic. That experiment
+was not landed because the right fix needs a reusable UML host-boundary
+contract, not one hard-coded printk call-site workaround.
+
 ## Non-Landed Experiments
 
 The following experiments were deliberately not landed:

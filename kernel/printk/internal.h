@@ -193,7 +193,7 @@ extern bool console_irqwork_blocked;
  */
 static inline void printk_get_console_flush_type(struct console_flush_type *ft)
 {
-	memset(ft, 0, sizeof(*ft));
+	*ft = (struct console_flush_type) { };
 
 	switch (nbcon_get_default_prio()) {
 	case NBCON_PRIO_NORMAL:

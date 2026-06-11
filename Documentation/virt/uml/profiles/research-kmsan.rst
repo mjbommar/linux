@@ -63,8 +63,11 @@ with kselftest SKIP if the supplied binary was not built with KMSAN.
 
 As of 2026-06-11, a clean LLVM ``uml/research-kmsan`` kernel build passes.
 The runtime smoke now gets past the earlier KMSAN vmalloc shadow/origin
-mapping failure and the later UMID host-helper boundary report, then fails
-before the ``KMSAN_SMOKE`` marker with a repeated ``vsnprintf()`` report from
+mapping failure, the UMID host-helper boundary report, the printk
+``console_flush_type`` local-state report, and the raw ``memset()`` reports
+caused by UML's normal ``-fno-builtin`` build flags. It still fails before the
+``KMSAN_SMOKE`` marker with a repeated ``vsnprintf()`` report from the
+non-instrumented ``os_add_epoll_fd()`` host-helper path during
 ``console_on_rootfs()``. Treat this profile as buildable but not yet
 runtime-closed.
 

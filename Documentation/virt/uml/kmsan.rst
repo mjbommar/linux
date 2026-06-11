@@ -149,10 +149,14 @@ page-aligned vmalloc metadata layout gets past the previous early
 ``vmalloc error`` / ``__vmap_pages_range_noflush()`` failure. Runtime
 closure remains open because the smoke guest still reports KMSAN findings
 before it can emit the ``KMSAN_SMOKE`` result marker. Current-head testing gets
-past the earlier UMID host-helper boundary report; the first repeated report is
-now in ``vsnprintf()`` from ``console_on_rootfs()``. That report stream is being
-tracked as runtime KMSAN initialization work rather than as a vmalloc-layout
-failure.
+past the earlier UMID host-helper boundary report, the printk
+``console_flush_type`` local-state report, and the generic raw ``memset()``
+reports that appeared while UML's ``-fno-builtin`` flag prevented Clang's KMSAN
+memory-intrinsic lowering. The first repeated landed-head report is now a
+``vsnprintf()`` report from the non-instrumented UML host-helper
+``os_add_epoll_fd()`` path during ``console_on_rootfs()``. That report stream is
+being tracked as a UML host-boundary metadata problem rather than as a
+vmalloc-layout failure.
 
 Further reading
 ===============
