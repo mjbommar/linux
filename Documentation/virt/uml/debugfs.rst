@@ -6,9 +6,8 @@ UML debugfs runtime API
 
 The UML kernel exposes runtime-flippable observability hooks under
 ``/sys/kernel/debug/um/`` when built with ``CONFIG_DEBUG_FS=y``. The
-interface is the user-facing side of the Layer 2 static-key gate
-infrastructure described in
-``Documentation/virt/uml/redesign/01-architecture/three-layers.md``.
+interface is the user-facing side of UML's static-key hook
+infrastructure.
 
 Requires root (files are mode ``0400``/``0600``).
 
@@ -32,7 +31,7 @@ Layout
 -----------
 
 Plain text, one line, the current backend's name: ``ptrace``,
-``seccomp``, or ``kvm`` (when workstream D lands). Empty backend
+``seccomp``, or a KVM backend name when KVM is enabled. Empty backend
 shows ``(uninitialized)`` — should never be observed on a booted
 kernel.
 
@@ -54,8 +53,7 @@ Toggling is effective immediately: the next syscall / page fault /
 context switch / IRQ / clock read that crosses the relevant hook
 site will fire the slow path.
 
-Gate semantics (workstream C fills in real consumers; today the
-slow paths bump a hit counter in ``stats``):
+Gate semantics:
 
 ``trace_syscalls``
     Fires the trace slow-path on every syscall entry/exit, page
@@ -63,21 +61,19 @@ slow paths bump a hit counter in ``stats``):
     ftrace/trace-events subsystem.
 
 ``kcov_enabled``
-    Fires on syscall entry. Destined for the KCOV coverage
-    collector. Requires workstream C to port KCOV to UML; today
-    a stub counter.
+    Fires on syscall entry. Builds without a live KCOV consumer use
+    it as a counter-only hook.
 
 ``time_travel_active``
     Fires on clock reads. Engaged by the time-travel profile to
     swap in deterministic timekeeping.
 
 ``kfence_sample``
-    Fires on clock reads. Engaged by a future KFENCE port (work-
-    stream C) to trigger periodic sampling.
+    Fires on clock reads. Reserved for KFENCE sampling control.
 
 ``record_replay``
     Fires at every gate site. Destined for the record-replay
-    subsystem (workstream C).
+    subsystem.
 
 ``perf_dispatch``
     Fires on syscall entry and context switch. Feeds the kernel's
@@ -102,16 +98,14 @@ Cost impact
 ===========
 
 With every gate off (default), the steady-state cost is ~1 ns per
-gate per hook pass — well inside invariant I3 (see
-``Documentation/virt/uml/redesign/01-architecture/invariants.md``).
+gate per hook pass.
 Flipping a gate on adds the cost of the slow-path implementation
 on *every* pass through that hook site; see ``stats`` to monitor
 hit rate.
 
-When ``CONFIG_HAVE_ARCH_JUMP_LABEL=y`` is enabled (workstream B-04
-work), the off-state cost drops further to ~0.3 ns (a 5-byte NOP at
-each gate). Until then, the C fallback form is used — see
-``redesign/04-risks/decisions-log.md`` D19.
+When ``CONFIG_HAVE_ARCH_JUMP_LABEL=y`` is enabled, the off-state
+cost drops further to a 5-byte NOP at each gate. Until then, the C
+fallback form is used.
 
 Absent ``CONFIG_DEBUG_FS=y``
 ============================
@@ -119,6 +113,6 @@ Absent ``CONFIG_DEBUG_FS=y``
 The ``sandbox`` profile sets ``CONFIG_DEBUG_FS=n`` and therefore
 has no ``/sys/kernel/debug/um/`` tree. The gates themselves are
 still compiled in (or can be compiled out via per-gate Kconfig
-symbols added in workstream C). Without the debugfs interface,
-gates remain in their Kconfig-chosen default state for the
-lifetime of the boot — nothing flips them.
+symbols). Without the debugfs interface, gates remain in their
+Kconfig-chosen default state for the lifetime of the boot — nothing
+flips them.

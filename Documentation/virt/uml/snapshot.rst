@@ -4,30 +4,24 @@
 UML snapshot / forkserver (v1)
 ===============================
 
-The UML snapshot / forkserver surface landed in workstream C-09 of
-the redesign (see
-``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/09-snapshot-forkserver.md``). It gives a UML
-kernel a cooperative "ready point," a ``fork()``-based worker
-spawner, and an AFL-compatible 12-byte-per-iteration wire protocol
-on host file descriptors 198 and 199.
+The UML snapshot / forkserver surface gives a UML kernel a
+cooperative "ready point," a ``fork()``-based worker spawner, and an
+AFL-compatible 12-byte-per-iteration wire protocol on host file
+descriptors 198 and 199.
 
-The v1 landing is intentionally narrow: it provides the kernel-
-side plumbing and the protocol seam so an external fuzzer (AFL++,
-syzkaller's upcoming ``vm/uml`` backend) can drive per-iteration
-execution against trivial, short-lived guest payloads. A v2
-redesign covering sustained fuzz on blocking guest syscalls — with
-a freezer-cgroup pre-fork + per-task re-clone path — is outlined
-in decisions-log ``D41`` / ``D42`` and in
-``Documentation/virt/uml/redesign/08-future-phases/
-02-snapshot-to-disk.md``.
+The v1 protocol is intentionally narrow: it provides the kernel-side
+plumbing and protocol boundary so an external fuzzer, such as AFL++
+or a UML-aware syzkaller runner, can drive per-iteration execution
+against trivial, short-lived guest payloads. Sustained fuzzing across
+blocking guest syscalls needs stronger quiescence and task-state
+reinitialization than this v1 forkserver provides.
 
 Availability
 ============
 
 Compiled only when a profile explicitly enables
 ``CONFIG_UM_SNAPSHOT_FORKSERVER``. The ``fuzz`` defconfig is the
-expected consumer once commit 6 lands. Other profiles
+expected consumer. Other profiles
 (``prod-fast``, ``sandbox``, ``research``) intentionally leave it
 off — the forkserver is not a zero-cost feature and has no
 meaning outside a fuzz context.
@@ -88,8 +82,7 @@ one. Today three paths reach it:
    exported as a kernel symbol gated on
    ``CONFIG_UM_SNAPSHOT_FORKSERVER=y``.
 
-Signal-based triggers (``SIGRTMIN+N``, per decisions-log ``D38``)
-will share the same entry point when they land.
+Signal-based triggers are not implemented.
 
 How it works
 ============
@@ -100,41 +93,30 @@ Quiesce and fork
 When ``um_snapshot_ready`` fires with both fds open, the kernel
 (a) writes the AFL\\0 handshake on 199, (b) blocks the UML-
 dispatched host signal set via the ``signals_enabled`` thread-
-local gate (see decisions-log ``D41``), (c) reads one 4-byte
-testcase descriptor on 198, (d) ``fork()``s a worker, (e) writes
-the worker's pid back on 199, and (f) writes a hard-coded
-exit status of ``0`` on 199 — see the v1-ceiling caveat
-below. At the top of the next iteration the parent drains any
-zombies from prior iterations via a non-blocking
-``wait4(-1, WNOHANG)``. The parent does NOT ``waitpid()`` on
-the specific worker before reporting status — the v1 ceiling
-prevents that path from working today.
+local gate, (c) reads one 4-byte testcase descriptor on 198,
+(d) ``fork()``s a worker, (e) writes the worker's pid back on 199,
+and (f) writes a hard-coded exit status of ``0`` on 199 — see the
+v1-ceiling caveat below. At the top of the next iteration the parent
+drains any zombies from prior iterations via a non-blocking
+``wait4(-1, WNOHANG)``. The parent does not ``waitpid()`` on the
+specific worker before reporting status.
 
 **v1 ceiling: exit-status semantics.** The status slot is
-hard-coded to ``0`` regardless of the worker's real exit. Four
-separate attempts (2026-04-21 / 2026-04-23) to insert any
-form of ``waitpid(pid)`` between pid-report and status-report
-crashed the parent with ``Kernel mode signal 4`` (SIGILL) in
-UML kernel context. Root cause: UML's timer ``SIGALRM``
-dispatched into UML's signal handler during the non-UML-
-kernel parent-execution window, calling ``switch_threads()``
-and ``longjmp()``'ing into a ``jmp_buf`` captured pre-fork —
-stale stack, next instruction decoded from garbage, SIGILL.
-Attempts tried: bare blocking ``wait4``, ``wait4(WNOHANG)``
-spin-poll, ``WNOHANG`` + ``clock_nanosleep``, ``WNOHANG`` +
-``sched_yield``, ``WNOHANG`` + host-level ``sigprocmask
-SIG_BLOCK``; all four reproduced the crash.
+hard-coded to ``0`` regardless of the worker's real exit.
+Parent-side waiting between pid-report and status-report is not
+supported because it can re-enter UML scheduling from host signal
+context while the parent is outside the normal UML kernel execution
+path.
 
 Consumers that care about worker exit status must use a side
 channel until this is fixed. For AFL-compatible fuzzing the
 shared-memory coverage map already encodes worker crashes;
 the status-fd ``0`` is documented-and-expected for v1.
 
-Proper fix requires UML infrastructure work on the signal/
-schedule interaction during parent non-kernel-exec windows —
-or a refactor where the worker writes its status via the
-status fd BEFORE calling ``exit``, sidestepping the whole
-parent-side reap path.
+Proper exit-status reporting requires either stronger control of the
+signal/schedule interaction during parent non-kernel-exec windows or
+a protocol change where the worker reports its own status before
+exiting.
 
 Worker reinit
 -------------
@@ -145,8 +127,7 @@ state (pthread handles, epoll fds targeting parent-only events,
 POSIX timers targeting the parent's thread id). The worker's
 first act is ``um_snapshot_worker_init``, which walks a small
 "forget → detach scheduler tasks → rebuild" path before returning
-to guest code. See decisions-log ``D41`` / ``D42`` for the design
-rationale and the v1 ceiling.
+to guest code.
 
 Per-FD disposition
 ------------------
@@ -154,8 +135,7 @@ Per-FD disposition
 Every host file-descriptor creation site in ``arch/um/os-Linux/``
 carries a ``/* FD disposition ... */`` comment naming how it
 behaves across a snapshot fork: ``inherit``, ``worker-rebuild``,
-``exec-transmit``, ``exec-probe``, and so on. See the commit-4
-section of the C-09 design doc for the taxonomy.
+``exec-transmit``, ``exec-probe``, and so on.
 
 Limitations (v1 ceiling)
 ========================
@@ -167,33 +147,23 @@ Limitations (v1 ceiling)
   v1 ``sched_worker_detach_other_tasks`` helper alone. Observed
   as a KASAN slab-out-of-bounds in ``__set_next_task_fair`` on
   the first voluntary ``schedule()`` after a blocking syscall.
-  v2 replaces the narrow helper with a freezer-cgroup pre-fork
-  barrier + per-task re-clone.
+  Longer-lived workers need stronger task and scheduler-state
+  reinitialization than v1 provides.
 
 - **Single status byte is a placeholder.** The 4-byte status sent
-  back on fd 199 is zero in v1; a real exit-status bridge is
-  deferred to v2. The obvious fix — a blocking ``waitpid`` between
-  pid-write and status-write — crashes the parent reproducibly
-  even with UML's signal gate + raw ``wait4`` syscall; three
-  separate sessions have failed to root-cause the crash, and
-  further attempts are explicitly paused pending v2's
-  freezer-cgroup redesign. See the KNOWN LIMITATION comment at
-  the top of ``arch/um/kernel/snapshot.c``'s per-iteration AFL
-  protocol for the current working theory.
+  back on fd 199 is zero in v1. A blocking ``waitpid`` between
+  pid-write and status-write is not safe in the parent path, so the
+  current ABI treats the status word as a placeholder. See the KNOWN
+  LIMITATION comment at the top of ``arch/um/kernel/snapshot.c``'s
+  per-iteration AFL protocol for the rationale.
 
-- **Zombies no longer accumulate** (commit `257b8cf61b84`,
-  2026-04-21). Each forkserver iteration begins with a
-  non-blocking ``wait4(-1, ..., WNOHANG)`` drain
+- **Zombies do not accumulate.** Each forkserver iteration begins
+  with a non-blocking ``wait4(-1, ..., WNOHANG)`` drain
   (``os_snapshot_reap_zombies()``), reaping any worker that
   exited during the prior iteration's think time. The WNOHANG
-  flag keeps the drain off the crash path the blocking variant
-  hit. Verified by inspecting ``ps --ppid <uml_pid>`` after a
-  completed iteration — no surviving child processes.
+  flag keeps the drain off the crash path the blocking variant hit.
 
-- **No on-disk snapshot.** v1 is a live-fork forkserver only. An
-  ELF-core-with-PT_NOTE on-disk snapshot / resume path is
-  outlined in ``08-future-phases/02-snapshot-to-disk.md`` and is
-  v2 or later.
+- **No on-disk snapshot.** v1 is a live-fork forkserver only.
 
 - **No SMP.** CONFIG_SMP is not supported on UML in-tree; the
   forkserver is single-CPU only.
@@ -217,14 +187,5 @@ default ``128M``.
 Further reading
 ===============
 
-- ``Documentation/virt/uml/redesign/02-workstreams/
-  C-profiles-and-gaps/09-snapshot-forkserver.md`` — v1 design.
-- ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-  — ``D35`` (scope), ``D36`` (on-disk format v2), ``D37`` (v1
-  pull-forward items), ``D38`` (Mode A vs Mode B), ``D39`` /
-  ``D40`` (commit-3 split), ``D41`` (signals_enabled contract),
-  ``D42`` (CFS worker-detach helper).
-- ``Documentation/virt/uml/redesign/08-future-phases/
-  02-snapshot-to-disk.md`` — v2 on-disk design.
 - AFL++ ``src/afl-forkserver.c`` — reference for the wire
   protocol.

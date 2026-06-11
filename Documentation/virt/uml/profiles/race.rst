@@ -32,21 +32,15 @@ Why a separate profile, not an option in ``fuzz-deep``
 
 Upstream Linux (``lib/Kconfig.kcsan``) mutually excludes
 ``CONFIG_KASAN`` and ``CONFIG_KCSAN`` — you can enable one, not
-both, per kernel build. The plan's original fuzz-deep matrix row
-called for **both** detectors, which isn't achievable on a stock
-kernel. Rather than change the upstream constraint (a large,
-orthogonal patch series) or fork fuzz-deep into two variants, this
-release splits concern:
+both, per kernel build. Rather than change that upstream constraint
+or fork fuzz-deep into two variants, the UML profile set splits
+concern:
 
 - ``fuzz-deep`` stays KASAN-focused (heap corruption, use-after-free).
 - ``race`` is KCSAN-focused (data races, concurrency bugs).
 
 Each is a full profile a user can build and ship; picking "which
 class of bugs am I hunting today?" is then a build-time choice.
-See ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-D26 for the decision and
-``Documentation/virt/uml/redesign/03-profiles/fuzz-deep.md`` for
-the reconciliation note.
 
 What's on
 =========
@@ -104,4 +98,3 @@ See also
 - :doc:`index`
 - :doc:`fuzz-deep`
 - ``Documentation/dev-tools/kcsan.rst`` — upstream KCSAN guide
-- ``Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/03-port-kcsan.md``

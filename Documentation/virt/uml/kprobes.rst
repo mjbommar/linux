@@ -4,12 +4,10 @@
 UML kprobes port
 ================
 
-The UML kprobes surface landed in workstream C-04 of the redesign
-(see ``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/04-port-kprobes.md``). It exposes the standard
-Linux kprobes API — ``register_kprobe()``, ``register_kretprobe()``,
-``samples/kprobes/`` modules, and the ``/sys/kernel/debug/kprobes/``
-tracefs surface — to UML x86_64 guests.
+UML exposes the standard Linux kprobes API:
+``register_kprobe()``, ``register_kretprobe()``, the
+``samples/kprobes/`` modules, and the
+``/sys/kernel/debug/kprobes/`` debugfs surface.
 
 Availability
 ============
@@ -45,10 +43,10 @@ From inside a booted guest the standard in-tree samples work::
    rmmod kretprobe_example
 
 ``bpftrace``'s ``kprobe:`` and ``kretprobe:`` matchers work in the
-``research`` profile as of workstream C-06 v1 (2026-04-21): the
-profile enables ``CONFIG_BPF_SYSCALL`` + ``CONFIG_BPF_JIT``, and
-the UML x86_64 JIT compiles BPF programs natively. ``register_kprobe()``
-/ ``register_kretprobe()`` from out-of-tree modules work today.
+``research`` profile: the profile enables ``CONFIG_BPF_SYSCALL`` +
+``CONFIG_BPF_JIT``, and the UML x86_64 JIT compiles BPF programs
+natively. ``register_kprobe()`` / ``register_kretprobe()`` from
+out-of-tree modules work today.
 
 How it works
 ============
@@ -68,8 +66,8 @@ to single-step it, and returns. The subsequent ``SIGTRAP`` (from
 the TF step) is dispatched to ``kprobe_debug_handler()`` for the
 post-handler and IP fix-up.
 
-Text patching uses the page-scoped ``mprotect`` path that the B-04
-section split set up. The single-byte install is atomic with
+Text patching uses the page-scoped ``mprotect`` path documented in
+:doc:`section-split`. The single-byte install is atomic with
 respect to the host's load/store ordering; no ``stop_machine`` is
 needed for a 1-byte poke.
 
@@ -91,10 +89,10 @@ auto-promotes to ``CONFIG_KRETPROBES=y`` +
 - ``arch_rethook_fixup_return`` — restores the real return address
   after the handler runs.
 
-Limitations (2026-04-21)
-========================
+Current limitations
+===================
 
-Three user-visible gaps remain after the C-04 landing:
+Three user-visible gaps remain:
 
 ``CONFIG_KPROBE_EVENTS`` (tracefs-based probe installation via
   ``/sys/kernel/tracing/kprobe_events``) requires
@@ -106,8 +104,7 @@ Three user-visible gaps remain after the C-04 landing:
   routes function-entry probes through the ftrace call stub
   instead of through ``int3``) is not implemented. Function-entry
   probes work via ``int3`` and pay the trap cost (~400 ns per
-  hit). Mid-function probes need ``int3`` regardless. Tracked as a
-  Q4-phase follow-up; see D32 for the scope decision.
+  hit). Mid-function probes need ``int3`` regardless.
 
 ``HAVE_FUNCTION_GRAPH_TRACER`` is intentionally not selected on UML.
   Kretprobes use the generic rethook shadow stack and remain the
@@ -166,18 +163,13 @@ Typical run::
 
 A clean run reports
 ``KPROBES_STRESS: PASS iters=N fires=M errors=0 graph=<on|deferred>``.
-The ``graph=`` token flips to ``on`` once C-04 commit 3b lands;
-for now it's ``deferred``.
+Function graph tracing is not advertised on UML, so the current
+expected graph token is ``deferred``.
 
 Further reading
 ===============
 
 - ``Documentation/trace/kprobes.rst`` — the generic kprobes
   user-facing guide.
-- ``Documentation/virt/uml/redesign/02-workstreams/
-  C-profiles-and-gaps/04-port-kprobes.md`` — the workstream plan,
-  including scope decisions D32/D33/D34.
-- ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-  — architectural decisions and their rationale.
 - ``tools/testing/selftests/um/kprobes-stress/`` — the regression
   harness described above.

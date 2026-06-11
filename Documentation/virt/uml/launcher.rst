@@ -10,12 +10,9 @@ to set up rootfs, console, and command-line arguments, and it
 exposes a declarative CLI with structured logging, signal
 forwarding, and the AFL forkserver fd protocol built in.
 
-Workstream C-10 of the UML redesign (see
-``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/10-host-launcher-crosvm.md``). v1 scope is
-single-process supervision; v2 will add per-device vhost-user
-helpers with per-device seccomp filters for the sandbox
-profile.
+The base command supervises a single UML process. The launcher also
+contains per-device vhost-user backend helpers for isolated virtio
+devices where a profile or command line requests them.
 
 Install
 =======
@@ -211,21 +208,21 @@ for each socket to appear, appends
 ``virtio_uml.device=<socket>:<id>`` entries to the kernel
 cmdline, then supervises both UML and the backends. On UML
 exit (or SIGTERM to the launcher), each backend is sent
-``SIGTERM``, given 500 ms to clean up, then ``SIGKILL`` d if
+``SIGTERM``, given 500 ms to clean up, then ``SIGKILL`` if
 still alive, and its socket file is unlinked. No orphan
 processes survive a clean exit.
 
-Roadmap
-=======
+Implemented capabilities
+========================
 
-v1 (shipped 2026-04-20)
+Base supervision
   * Spawn, supervise, reap. One UML process.
   * CLI + env + TOML config merge.
   * Signal forwarding + exit-code passthrough.
   * Forkserver fd plumbing.
   * hostfs root, stdio/null console.
 
-v2 (shipped 2026-04-23)
+Device backends
   * Per-device host processes over vhost-user: console
     (full TX + RX + stdin reader), net (TAP, no offloads),
     block (preadv/pwritev, FLUSH, GET_ID, RO gate).
@@ -247,8 +244,8 @@ v3 (later)
 Further reading
 ===============
 
-* ``Documentation/virt/uml/snapshot.rst`` — C-09 snapshot /
-  forkserver surface that ``--forkserver`` interoperates with.
+* ``Documentation/virt/uml/snapshot.rst`` — snapshot / forkserver
+  surface that ``--forkserver`` interoperates with.
 * ``tools/uml/uml-launcher/README.md`` — build / install / local
   quickstart.
 * crosvm (https://crosvm.dev/) — architectural prior art for

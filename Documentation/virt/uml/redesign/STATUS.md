@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest curation, and umlbuild validation.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, and umlbuild validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -273,7 +273,7 @@ Remaining pool/vector2 boundary:
 
 - launcher-owned vector2 fd handoff is validated on the standalone `umlctl up`
   path. Per-take pool fd handoff is retired from the current completion claim:
-  historical `memo09` notes deferred a future SCM_RIGHTS TAP-fd swap, but
+  historical design notes deferred a future SCM_RIGHTS TAP-fd swap, but
   current `next` pool takes deliberately carry string identity through the
   identity memfd and use the vector2 TAP reopen path for per-member TAP
   isolation.
@@ -299,12 +299,12 @@ developer-facing paths:
   `UMLBUILD`, and `UMLCTL` overrides so validating `umlbuild` does not require
   destructive cleanup of a developer tree that contains in-tree kernel build
   products; and
-- active launcher/selftest planning-label cleanup is partially closed:
-  focused scans over `arch/um`, `tools/testing/selftests/um`, and
-  `tools/uml/uml-launcher` no longer find standalone workstream, decision,
-  memo, or phase-label patterns after excluding operational post-mortem wording
-  and archived redesign material. Broader non-redesign UML docs still need a
-  dedicated style normalization pass.
+- active launcher, selftest, and non-redesign UML documentation cleanup is
+  closed for the targeted planning-label patterns: focused scans over
+  `arch/um`, `tools/testing/selftests/um`, `tools/uml/uml-launcher`, and
+  non-redesign `Documentation/virt/uml/*.rst` no longer find standalone
+  workstream, decision-log, memo, phase-history, or future-phase labels, apart
+  from a real OpenWrt sample kernel version line containing `#0`.
 
 The active deployment path is `umlctl up/down` with Umlfile parsing, not a
 separate `deploy` subcommand.

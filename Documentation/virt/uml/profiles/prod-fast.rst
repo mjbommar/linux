@@ -7,7 +7,7 @@ UML profile: prod-fast
 :Intended user: production workload with no runtime observability
    requirement
 :Backend: DYNAMIC — ``backend=auto`` picks seccomp where available,
-   ptrace otherwise (KVM will be added in workstream D)
+   ptrace otherwise
 :Fragment: ``arch/um/configs/profiles/prod-fast.config``
 
 What this profile is for

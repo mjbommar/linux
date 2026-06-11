@@ -4,12 +4,9 @@
 UML ftrace port
 ===============
 
-The UML function tracer landed in workstream C-05 of the redesign
-(see ``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/05-port-ftrace.md``). It exposes the standard
-Linux function-tracer surface — ``/sys/kernel/tracing/``,
-``echo function > current_tracer``, ``set_ftrace_filter``,
-tracepoints at function granularity — to UML guests.
+UML exposes the standard Linux function-tracer surface:
+``/sys/kernel/tracing/``, ``echo function > current_tracer``,
+``set_ftrace_filter``, and tracepoints at function granularity.
 
 Availability
 ============
@@ -39,23 +36,21 @@ How it works
 ============
 
 UML's port uses the compiler's ``-fpatchable-function-entry=5,0``
-insertion rather than ``-pg -mfentry + scripts/recordmcount``
-(D29 in the decisions log explains the toolchain choice —
-``-mcmodel=large`` makes ``-mfentry`` emit 33-byte indirect call
-sequences that ``recordmcount`` cannot recognize). The compiler
-places a 5-byte ``nop`` at every traced function's entry and
-records its address in ``__patchable_function_entries``. At
-runtime the kernel patches the ``nop`` to ``call ftrace_caller``
-to enable tracing, and back to ``nop`` to disable.
+insertion rather than ``-pg -mfentry + scripts/recordmcount``.
+``-mcmodel=large`` makes ``-mfentry`` emit long indirect call
+sequences that ``recordmcount`` cannot recognize. The compiler
+places a 5-byte ``nop`` at every traced function's entry and records
+its address in ``__patchable_function_entries``. At runtime the
+kernel patches the ``nop`` to ``call ftrace_caller`` to enable
+tracing, and back to ``nop`` to disable.
 
 Runtime patching runs under ``stop_machine_cpuslocked()`` and
 wraps the whole batch in a single ``mprotect(RW)`` /
-``mprotect(RX)`` on ``[_text, _etext)`` (D28 + D30 explain why:
-UML has exactly one ``struct mm_struct``, so the
-``fixmap``-alias and ``text_poke_mm`` patterns used by
-arm/arm64/riscv/x86 are not available; ``stop_machine`` gives the
-closest equivalent safety property — no peer UML vCPU host
-thread runs kernel code during the window).
+``mprotect(RX)`` on ``[_text, _etext)``. UML has exactly one
+``struct mm_struct``, so the ``fixmap``-alias and ``text_poke_mm``
+patterns used by arm/arm64/riscv/x86 are not available.
+``stop_machine`` gives the closest equivalent safety property: no
+peer UML vCPU host thread runs kernel code during the window.
 
 Cost when tracing is off
 ========================
@@ -96,23 +91,19 @@ What is not supported yet
   interaction with UML task switching is repaired.
 - ``HAVE_DYNAMIC_FTRACE_WITH_REGS`` / ``_WITH_ARGS`` /
   ``_WITH_DIRECT_CALLS``: not yet implemented. The minimal port
-  in C-05 ships only the basic function tracer. REGS is expected
-  to land alongside kprobes-on-ftrace in workstream C-04.
+  supports only the basic function tracer. Register capture,
+  argument capture, and direct calls need additional UML arch glue.
 
 Interaction with other profile features
 =======================================
 
-See D31 in the decisions log: ``CONFIG_KCOV=y`` + ``CONFIG_FUNCTION_TRACER=y``
-on UML-UP causes the first ``echo function > current_tracer`` to
-hang for minutes. Root cause: KCOV instrumentation fires at every
-basic block in ``kernel/trace/ftrace.c`` during the ~21000-record
-batch patching loop, amplified by KASAN shadow-memory checks, with
-no ``cond_resched`` because ``stop_machine`` blocks signals. The
-resolution for now is profile-separation: ``research`` keeps the
-tracer + sanitizers; ``fuzz`` / ``fuzz-deep`` keep KCOV. Three
-follow-up engineering angles (upstream patch, narrow
-``__no_sanitize_coverage``, per-CPU KCOV soft-off) are preserved
-in D31 for a future session.
+``CONFIG_KCOV=y`` and ``CONFIG_FUNCTION_TRACER=y`` are kept in
+separate UML profiles. On UML-UP, enabling the function tracer while
+KCOV instruments the trace core can stall the first
+``echo function > current_tracer`` for minutes: KCOV fires at every
+basic block in ``kernel/trace/ftrace.c`` during the large batch
+patching loop, amplified by KASAN shadow-memory checks, with no
+``cond_resched`` because ``stop_machine`` blocks signals.
 
 Selftest
 ========
@@ -134,9 +125,9 @@ exist.
 UML backend tracepoints
 =======================
 
-The ``um_backend:*`` ftrace event subsystem (memo 25 R7) emits a
-tracepoint at the boundary between UML's mm-arbiter / trap loop
-and the active backend. Today's events:
+The ``um_backend:*`` ftrace event subsystem emits tracepoints at
+the boundary between UML's mm-arbiter / trap loop and the active
+backend. Current events:
 
 - ``um_backend_mm_create`` — per-mm lifecycle start (fired in
   ``init_new_context()`` after the backend's ``mm_create`` op
@@ -168,12 +159,12 @@ Or via ``trace-cmd``::
   $ trace-cmd record -e 'um_backend:*' ./workload
   $ trace-cmd report
 
-The ``vcpu_run_enter`` / ``vcpu_run_exit`` events memo 25 R7's
-wishlist mentions are deferred until the v2 KVM backend lands a
-kernel-side dispatcher around the trap loop —
-``arch/um/os-Linux/skas/process.c::userspace()`` is currently a
-USER TU (compiled with ``USER_CFLAGS``, no access to kernel-side
-tracepoint macros). Add them when the wrapper exists.
+``vcpu_run_enter`` / ``vcpu_run_exit`` events are not currently
+available. The trap loop lives in
+``arch/um/os-Linux/skas/process.c::userspace()``, a USER translation
+unit compiled with ``USER_CFLAGS`` and no access to kernel-side
+tracepoint macros. Add those events only after a kernel-side wrapper
+exists.
 
 See also
 ========
@@ -181,10 +172,3 @@ See also
 - :doc:`profiles/research`
 - :doc:`section-split`
 - :doc:`backends`
-- ``Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/05-port-ftrace.md``
-  (design)
-- ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-  §§ D27 (graph originally deferred — superseded by C-04 3a/3b),
-  D28 (patch mechanism), D29 (toolchain), D30 (bulk mprotect),
-  D31 (KCOV interaction), D34 (function-graph design + its
-  addendum-3/4 landing fix)

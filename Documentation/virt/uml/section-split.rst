@@ -1,11 +1,11 @@
 .. SPDX-License-Identifier: GPL-2.0
 
 ==============================
-UML .text section split (B-04)
-==============================
+UML .text section split
+=======================
 
-Since workstream B-04, the UML kernel image splits its executable
-text into two distinct regions:
+The UML kernel image splits its executable text into two distinct
+regions:
 
 .. list-table::
    :header-rows: 1
@@ -22,9 +22,9 @@ text into two distinct regions:
    * - ``.um_patch_text`` (bounded by ``__start_um_patch_text`` /
        ``__end_um_patch_text``)
      - RX normally; temporarily RWX during a patch
-     - Runtime-patchable code: future static_branch JIT NOPs, ftrace
-       mcount stubs, kprobe insertion points. Today typically empty —
-       workstream C and follow-ups populate it.
+     - Runtime-patchable code: static-branch NOPs, ftrace mcount
+       stubs, and kprobe insertion points. It may be empty when no
+       current consumer places code there.
 
 Why two regions
 ===============
@@ -97,10 +97,8 @@ function only logs the layout for diagnostics::
   um: section split: .text.frozen 0x600ab000..0x60641000 (5720 KiB),
       .um_patch_text 0x60641000..0x60642000 (4 KiB)
 
-When a future workstream enables JIT jump-label patching
-(see ``redesign/04-risks/decisions-log.md`` D19), the same call
-site becomes the natural place to apply the initial batch of NOP
-installs.
+When jump-label patching is enabled, the same call site is the
+natural place to apply the initial batch of NOP installs.
 
 Verifying the split
 ===================
@@ -121,18 +119,18 @@ are non-negative::
   0000000060641000 D __start_um_patch_text
 
 An empty patchable region (``__start_um_patch_text == __end_um_patch_text``)
-is expected until a workstream populates it.
+is expected when no runtime-patching consumer places code there.
 
-Relation to workstream B's gates
-================================
+Relation to static-key gates
+============================
 
 The Layer 2 static-key gates (``arch/um/include/asm/um-hooks.h``) are
 the *first* intended consumers of ``.um_patch_text``. Today those
 gates compile to the C fallback form (load + compare + predicted
-branch) — see decision D19 — because UML does not yet
-``select HAVE_ARCH_JUMP_LABEL``. The missing piece is the arch-glue
-``arch/um/kernel/jump_label.c``, which will use the mprotect helpers
-above to enable in-place NOP ↔ JMP transformation at each gate site.
+branch) because UML does not yet ``select HAVE_ARCH_JUMP_LABEL``.
+The missing piece is the arch glue in ``arch/um/kernel/jump_label.c``,
+which will use the mprotect helpers above to enable in-place
+NOP-to-JMP transformation at each gate site.
 
 Once that lands, the gates turn into 5-byte NOPs when off (invariant
 I3 in the letter, not just the spirit) and ``.um_patch_text`` starts

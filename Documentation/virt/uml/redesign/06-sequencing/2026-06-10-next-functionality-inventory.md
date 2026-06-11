@@ -128,7 +128,7 @@ This file is the live execution tracker for
 | Docs | `STATUS.md` | Present-current | `next` | Update after every landed workstream. | status review updated with launcher/selftest curation boundary, 2026-06-10. |
 | Docs | old reports/presentations | Present-stale | `next`, historical docs | Refresh or mark historical. | docs audit. |
 | Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
-| Docs | active UML user docs | Present-needs-style-normalization | `next` | Remove workstream/decision-log/memo/phase-history references from non-redesign `Documentation/virt/uml/*.rst` files or mark them historical where appropriate. | Focused scan still finds planning/history labels in ftrace, kprobes, KMSAN, debugfs, section-split, snapshot, and several profile docs, 2026-06-10. |
+| Docs | active UML user docs | Present-cleaned | `next` | Keep non-redesign UML docs focused on current interfaces and limitations, not workstream history. | Normalized ftrace, kprobes, KMSAN, debugfs, section-split, snapshot/forkserver, launcher, APERF/MPERF, and profile docs; focused scan over non-redesign `Documentation/virt/uml/*.rst` now has no standalone workstream/decision/memo/phase-history labels apart from an OpenWrt sample `#0` line, 2026-06-10. |
 | Docs | vector2 validation docs | Present-needs-update | `next` | Align with final gates. | docs audit. |
 | Upstream | patch queue | Present-stale | `next` docs | Regenerate from final `next`. | checkpatch and cover letters. |
 
@@ -161,6 +161,10 @@ This file is the live execution tracker for
   smoke scripts, `umlctl gate list --source-root .`, dry-run parse of all
   gate TOMLs, `uml-launcher run --dry-run --config` for the touched legacy
   launcher examples, and `git diff --check` all passed on 2026-06-10.
+- Active non-redesign UML docs no longer use workstream, decision-log, memo,
+  phase-history, or future-phase labels as current user-facing explanation.
+  The focused scan exception is a real OpenWrt sample kernel version line
+  containing `#0`.
 
 ## Remaining Hard Blockers
 
@@ -172,9 +176,10 @@ These items must be closed before the final branch can be called complete:
    pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
    now have dedicated smoke gates; per-take pool fd handoff has been retired
    from the current completion claim in favor of the validated TAP reopen path.
-4. Remaining upstream-facing docs must be cleaned of diary/history material.
-   The focused active source, launcher, and selftest scan is clean for the
-   targeted standalone planning-label patterns as of 2026-06-10.
+4. Old reports, presentations, and historical repro notes still need final
+   archival marking. Focused scans over active source, launcher, selftests,
+   and non-redesign UML docs are clean for the targeted standalone
+   planning-label patterns as of 2026-06-10.
 5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules

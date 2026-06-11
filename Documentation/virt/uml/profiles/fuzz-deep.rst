@@ -14,9 +14,8 @@ What this profile is for
 ========================
 
 Everything ``fuzz`` has, plus tighter KASAN mode and full lockdep.
-The long-term plan has ``CONFIG_KCSAN=y`` here too, but the UML
-KCSAN port is not available in this profile. ``fuzz-deep`` therefore
-ships without KCSAN.
+KCSAN is not available in this profile because upstream Kconfig keeps
+it mutually exclusive with KASAN.
 
 Use ``fuzz-deep`` after a candidate bug falls out of the ``fuzz``
 corpus and you want a denser observation window before handing off
@@ -49,8 +48,7 @@ What's still off
 KCSAN availability
 ==================
 
-The original plan matrix listed ``fuzz-deep`` as ``KASAN + KCSAN``.
-That combination is **not achievable on a stock kernel**:
+``KASAN + KCSAN`` is **not achievable on a stock kernel**:
 ``lib/Kconfig.kcsan`` declares ``depends on DEBUG_KERNEL && !KASAN``,
 so a single build can have one or the other, not both.
 
@@ -80,4 +78,3 @@ See also
 - :doc:`index`
 - :doc:`fuzz`
 - :doc:`research`
-- ``Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/03-port-kcsan.md``

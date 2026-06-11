@@ -1044,10 +1044,16 @@ Current state:
 - The launcher examples README and the `launcher`, `sandbox`, and `research`
   user-facing docs no longer describe those paths in workstream/future-v2
   terms.
-- A focused scan excluding `Documentation/virt/uml/redesign/**` still finds
-  planning/history references in active UML docs including ftrace, kprobes,
-  KMSAN, debugfs, section-split, snapshot, and several profile pages. Those
-  need a dedicated normalization pass rather than piecemeal edits.
+- The broader active-doc normalization pass also cleaned ftrace, kprobes,
+  KMSAN, debugfs, section-split, snapshot/forkserver, launcher, APERF/MPERF,
+  and profile docs.
+- A focused scan excluding `Documentation/virt/uml/redesign/**` now has no
+  standalone workstream, decision-log, memo, phase-history, or future-phase
+  labels in `*.rst` files except a real OpenWrt sample kernel version line
+  containing `#0`.
+- Remaining documentation cleanup is now the historical/reporting side:
+  old reports, presentations, and redesign archive material must either stay
+  clearly historical or be refreshed from final `next`.
 
 ## Workstream L: Upstream Series Readiness
 

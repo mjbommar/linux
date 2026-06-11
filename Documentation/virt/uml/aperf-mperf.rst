@@ -35,7 +35,7 @@ rdmsr on 0xE7 / 0xE8 returns zero.
 ``kvm-v2`` is its own KVM userspace VMM — it opens ``/dev/kvm``,
 creates the VM, and runs vCPUs itself, without QEMU in the path.  So
 adding the cap-enable is a five-line change and does not depend on
-the QEMU patch landing.  Two practical uses:
+QEMU support for the same bit.  Two practical uses:
 
 1. **Guest-side host-counter observation.**  cpupower, turbostat,
    custom frequency-governor code, and any workload that wants to

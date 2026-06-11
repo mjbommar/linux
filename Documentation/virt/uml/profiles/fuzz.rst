@@ -28,9 +28,8 @@ Run
 ===
 
 The resulting ``./linux`` binary can be invoked directly, or via
-``uml-launcher`` (workstream C-10) which wraps the argv + signal
-forwarding + AFL-forkserver fd plumbing. The fuzz-profile
-example config ships at
+``uml-launcher``, which wraps the argv, signal forwarding, and
+AFL-forkserver fd plumbing. The fuzz-profile example config ships at
 ``tools/uml/uml-launcher/examples/fuzz.toml``::
 
    exec 3<> /tmp/ctl   4<> /tmp/status
@@ -39,8 +38,8 @@ example config ships at
        --forkserver 3,4
 
 See ``Documentation/virt/uml/launcher.rst`` and
-``Documentation/virt/uml/snapshot.rst`` for the C-09/C-10
-forkserver protocol and launcher reference.
+``Documentation/virt/uml/snapshot.rst`` for the forkserver protocol
+and launcher reference.
 
 What's on
 =========

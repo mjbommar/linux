@@ -8,13 +8,7 @@ The UML KMSAN port uses the **VMALLOC quarter-split** layout
 matching ``arch/x86/include/asm/pgtable_64_types.h:124-169``.
 Under ``CONFIG_KMSAN=y``, the VMALLOC range is split into
 four equal quarters: new vmalloc, vmalloc shadow, vmalloc
-origin, and modules shadow+origin. See
-``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/07-port-kmsan-redesign.md`` for the
-feasibility comparison against the alternative (``task_size``
-cap) and ``Documentation/virt/uml/redesign/04-risks/
-decisions-log.md`` entries D58 + D62 for the decision
-history.
+origin, and modules shadow+origin.
 
 The port exposes the standard Linux uninitialized-memory
 detector surface — ``/sys/kernel/debug/kmsan/``, clang
@@ -65,15 +59,14 @@ non-KMSAN builds.
 Why not a dedicated shadow slab?
 ================================
 
-The original (D44) design reserved two 128 TiB host-mmap
-slabs above the KASAN shadow. That scheme worked for KASAN
-because KASAN's shadow is 1 byte per 8 kernel bytes —
-16 TiB of shadow for 128 TiB of VA. KMSAN's shadow is 1:1,
-so the same VA range wants 128 TiB of shadow plus another
-128 TiB of origin. 256 TiB of reservation doesn't fit in
-the lower canonical half on x86_64 (128 TiB total). D58
-records the breakage; D62 records the VMALLOC-quarter-split
-pick.
+A dedicated host-mmap shadow slab does not fit the x86_64 lower
+canonical half. KASAN can reserve 16 TiB of shadow for 128 TiB of
+kernel VA because its shadow is 1 byte per 8 kernel bytes. KMSAN
+needs 1 byte of shadow plus 4 bytes of origin metadata for every
+tracked byte class, so the equivalent reservation would exceed the
+available UML address layout. Reusing the VMALLOC range keeps the
+mapping arithmetic bounded and matches the generic KMSAN vmalloc
+metadata path.
 
 Comparison with x86:
 
@@ -111,8 +104,7 @@ Snapshot / forkserver integration
 
 When ``CONFIG_UM_SNAPSHOT_FORKSERVER=y``, the KMSAN shadow
 and origin regions live inside VMALLOC — already part of
-the mm_map-registered snapshot scope the C-09 forkserver
-exposes. No additional ``um_register_mmap_region()``
+the mm_map-registered snapshot scope. No additional ``um_register_mmap_region()``
 plumbing beyond what VMALLOC itself registers.
 
 Usage
@@ -149,11 +141,6 @@ Further reading
 
 * ``Documentation/dev-tools/kmsan.rst`` — generic KMSAN docs
   (bare-metal x86 + s390 + UML).
-* ``Documentation/virt/uml/redesign/02-workstreams/
-  C-profiles-and-gaps/07-port-kmsan-redesign.md`` — the D62
-  redesign's feasibility comparison.
-* ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-  D58 (broken original) + D62 (VMALLOC-split pick).
 * ``arch/um/include/asm/pgtable.h`` — ``VMALLOC_END`` /
   ``KMSAN_VMALLOC_*_START`` / ``KMSAN_MODULES_*_START``
   macros (the quarter-split layout).

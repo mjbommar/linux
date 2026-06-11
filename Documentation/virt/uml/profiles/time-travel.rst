@@ -66,8 +66,7 @@ Layer 2 gate note
 The ``um_hook_time_travel_active`` gate (see
 ``Documentation/virt/uml/debugfs.rst``) is present and runtime-
 flippable in this profile. Today its slow path is a counter stub;
-a future workstream replaces the stub with real deterministic-
-clock hooks.
+real deterministic-clock hooks are not wired to it yet.
 
 When to use something else
 ==========================
@@ -81,5 +80,3 @@ See also
 - :doc:`index`
 - ``Documentation/virt/user-mode-linux-howto-v2.rst`` — time-travel
   boot params
-- ``Documentation/virt/uml/redesign/03-profiles/time-travel.md`` —
-  design rationale
