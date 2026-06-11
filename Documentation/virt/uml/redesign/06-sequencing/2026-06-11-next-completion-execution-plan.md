@@ -4,18 +4,18 @@ Date: 2026-06-11
 
 Branch target: `next`
 
-Current committed baseline at latest refresh:
+Functional baseline used for this plan refresh:
 
-- `next`: `f9abd17de711`
-- `origin/next`: `f9abd17de711`
+- `next`: `32f0c97507d7`
+- `origin/next`: `32f0c97507d7`
 - `torvalds/master`: `9716c086c8e8`
-- `torvalds/master...next`: `0` commits behind, `125` commits ahead
+- `torvalds/master...next`: `0` commits behind, `131` commits ahead
 - upstream ancestry: `torvalds/master` is an ancestor of `next`
 - worktree state: clean at this plan refresh (`## next...origin/next`)
 
 Current execution evidence added on 2026-06-11:
 
-- refreshed this plan after the branch reached `f9abd17de711`;
+- refreshed this plan after the branch reached `32f0c97507d7`;
 - cleaned KVM v2 state comments and x86 UML ptrace TLS register handling in
   active source;
 - tightened the substrate gate and recorded CPython tier-0 evidence through
@@ -33,10 +33,22 @@ Current execution evidence added on 2026-06-11:
   reporting 84 pass, 0 fail, and 2 trusted-TAP skips, plus focused fd,
   multiqueue, in-process TAP, sandbox, and pool TAP smokes;
 - recorded a bounded KVM-v2/vector2 Tier 3 path smoke for one Django-v2 and
-  one FastAPI-v2 iteration; and
-- the pool/fork, CPython, and vector2 evidence is current focused evidence,
-  not a substitute for the final post-KMSAN/record-replay/vector2 validation
-  matrix.
+  one FastAPI-v2 iteration;
+- closed the UML KMSAN runtime-smoke blocker. The landed fix series clears
+  KMSAN host-boundary call metadata in UML host helpers, unpoisons hostfs data
+  filled by host syscalls, rejects host-side mappings in
+  `kmsan_virt_addr_valid()`, restores Clang KMSAN memory intrinsic lowering,
+  and makes the seccomp stub signal restorer stackless under
+  frame-pointer/KMSAN builds. Validation: clean LLVM `uml/research-kmsan`
+  build plus `kmsan-smoke` reporting
+  `KMSAN_SMOKE: PASS runtime=y reproducer=n`;
+- reran the current record/replay focused gates against the current `./linux`:
+  `kvm-record-smoke` reported 3067 live syscall entries, 245360 bytes used,
+  and 0 drops, and `kvm-record-clock-bench` reported `N=100`,
+  `observed=100`, `replayed=100`, and `mismatches=0`; and
+- the pool/fork, CPython, vector2, KMSAN, and record/replay evidence is
+  current focused evidence, not a substitute for the final post-record/replay/
+  vector2 validation matrix.
 
 This file is now the plan of record for completing, importing, or explicitly
 retiring all original UML v2 functionality on `next`.
@@ -255,13 +267,33 @@ they are implemented and validated, or explicitly retired with approval.
 | Blocker | Why it blocks | Required closeout |
 | --- | --- | --- |
 | Record/replay supported tier | The original vision names deterministic time-travel and record/replay as first-class functionality. Current `next` has an experimental core, live syscall hook, snapshot-backed start, and time-travel clock-event logging, but raw time/RDTSC/vvar, signals, device I/O, randomness, and deterministic workload policy are incomplete. | Define the first supported tier, implement missing policy, pass KUnit/live/deterministic workload gates, and document unsupported operations; or explicitly exclude record/replay from the completion claim as experimental. |
-| KMSAN runtime | The original instrumentation goal includes KMSAN. Current `next` builds `uml/research-kmsan` with LLVM and fixes the vmalloc metadata layout, but `kmsan-smoke` still fails before the result marker. | Fix the UML/KMSAN runtime metadata/stack/context issue or document the exact kernel blocker and decide whether KMSAN can remain non-completion. |
+| KMSAN regression protection | The original instrumentation goal includes KMSAN, and the runtime-smoke blocker is now closed on `next`. It remains in the blocker ledger only because final completion must prove the closure did not regress after record/replay, vector2, profile, or cleanup changes. | Rerun a clean LLVM `uml/research-kmsan` build and `kmsan-smoke` in the final validation matrix. Do not reopen KMSAN as an implementation gap unless that rerun regresses. |
 | KGDB disposition | The original instrumentation list includes KGDB, but current UML does not select `HAVE_ARCH_KGDB` and no live profile fragment enables `CONFIG_KGDB`. | KGDB is deferred-not-present in the current completion tracker. Reintroduce it only with UML architecture support, backend register access, a transport decision, and a smoke test. |
 | Vector2 publication readiness | Vector2 has strong focused and long seccomp evidence, but the replacement/publication claim still needs final Tier 3, KVM v2, and multiqueue/fairness coverage. | Finish the natural seccomp long run, run equivalent KVM v2 Tier 3 networking, add fairness/performance evidence, and keep parser-only transports out of runtime claims. |
 | KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
 | Pool/fork-server final regression pass | The rebuilt current-HEAD `59ad334001ea` binary passes the focused pool/fork/syzkaller regression set, including warm-pool, replicated sustained-pool, pool benchmark, and syzkaller shim. Final validation must still be rerun after later KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
 | Active cleanup | The branch must read like normal kernel work. Active code cannot carry private issue numbers, phase diaries, or random branch history. | Review scans over active source, selftests, launcher, active UML docs, live status, and current vector2 trackers; archive or remove stale material. |
 | Final validation matrix | Individual smokes do not prove the branch as a product. | Run the final integration gate and record exact pass/fail/skip, commit, upstream base, retired/deferred items, and push confirmation. |
+
+## Execution Slice Plan From Current Head
+
+The plan from `32f0c97507d7` is to finish one high-risk surface at a time and
+push after each validated slice. The ordering is intentional: record/replay
+changes can affect KVM syscall dispatch and time/signal handling, so the final
+vector2, pool, profile, and cleanup gates should run after that work settles.
+
+| Slice | Target | Implementation outcome | Required validation before commit |
+| --- | --- | --- | --- |
+| S0 | Plan and baseline refresh | This file records the current branch, closed KMSAN blocker, live record/replay evidence, and remaining order of work. | `git diff --check`; pushed docs-only commit. |
+| S1 | Record/replay tier definition and ABI | Define the first supported replay tier in docs and code comments; keep the public support label experimental until the deterministic workload gate passes. Close the debugfs-control-writer ambiguity by adding a task-scoped runner or test harness that records the task that actually executes the workload. | Record KUnit; live record smoke; shell syntax for new selftests. |
+| S2 | Record/replay syscall payload model | Extend the record entries or add side records for the selected syscall subset so replay can restore user-visible payloads, not just return values. Strict replay must compare syscall number, arguments relevant to the selected tier, return value, and payload lengths. | Record KUnit covering payload copyout, truncation, overflow, mismatch, and cursor preservation. |
+| S3 | Record/replay time, signal, and device policy | Implement the selected tier's deterministic policy for time, vvar/RDTSC, SIGALRM/signal delivery, randomness, and device I/O. Unsupported operations must fail closed in strict replay instead of silently becoming best-effort. | Clock bench; deterministic workload replay; targeted negative tests for unsupported operations. |
+| S4 | Record/replay user-facing documentation | Update debugfs, Kconfig help, selftest README, and live inventory so users know the exact supported tier, limitations, and experimental status. | Documentation grep for stale stronger claims; `git diff --check`. |
+| S5 | Vector2 publication gates | Run the natural seccomp long gate, full KVM-v2 Tier 3 networking, and multiqueue fairness/performance tests on the post-record/replay tree. | Vector2 KUnit, fd/multiqueue/inproc/pool/sandbox smokes, Tier 3 reports. |
+| S6 | Pool, fork-server, and syzkaller final rerun | Revalidate the pool/fork/syzkaller surfaces after record/replay and vector2 are stable. Decide snapshot-backed fork-server disposition. | Full pool/fork/syzkaller smoke set listed below. |
+| S7 | Profile and instrumentation final matrix | Rebuild every UML profile and run matching runtime probes. KMSAN is a regression-protection gate here, not an open implementation gap. KGDB remains deferred unless implemented in a separate slice. | Profile config/build matrix; sanitizer/instrumentation smokes, including KMSAN. |
+| S8 | Active-source cleanup pass | Review active source, selftests, launcher, non-redesign docs, live status docs, and current trackers for private history, stale phase labels, and unsupported claims. | Focused grep scans reviewed; checkpatch for touched source; launcher Rust and script syntax gates as needed. |
+| S9 | Upstream queue and final integration gate | Regenerate patch-series planning from the final branch, run the full integration gate, update status/inventory/final note, commit, and push. | Final validation matrix; `next == origin/next`; upstream ancestry check. |
 
 ## Workstream Order
 
@@ -320,6 +352,16 @@ Current state:
 - Live KVM syscall dispatcher can observe and replay syscall return values.
 - Snapshot-backed record start exists.
 - UML time-travel clock events can round-trip through the record log.
+- Current live validation proves syscall recording and time-travel event replay:
+  `kvm-record-smoke` records 3067 live syscalls with 0 drops, and
+  `kvm-record-clock-bench` replays 100/100 observed clock events with 0
+  mismatches.
+- The current debugfs control path is not yet a deterministic workload replay
+  ABI. A debugfs `start` write snapshots the task writing the control file,
+  while the shell or workload that runs after that write is a different task.
+  That means the current live smoke is valuable evidence for dispatcher
+  logging and snapshot attachment, but it is not proof that a workload can be
+  restored and replayed from its own pre-record state.
 - Raw time, vvar, RDTSC, signal, device, randomness, external I/O, and
   deterministic workload policy remain incomplete.
 
@@ -328,6 +370,17 @@ Decision required:
 - Either complete a first supported replay tier and count it in the original
   mission, or keep record/replay experimental and exclude it from the 100%
   completion claim with an explicit rationale.
+
+Default decision for this plan:
+
+- Complete a bounded first tier, called **R/R-1**, on `next`.
+- Keep `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL` and debugfs
+  labels until R/R-1 passes the deterministic workload gate.
+- Do not promise whole-system replay, arbitrary networking, arbitrary block
+  I/O, or cross-kernel-version replay in R/R-1.
+- Do promise deterministic replay for a single KVM v2 userspace task executing
+  a bounded syscall/time workload from a task-owned snapshot, with strict
+  mismatch detection and explicit fail-closed handling for unsupported events.
 
 If completing:
 
@@ -346,6 +399,63 @@ Acceptance:
 - Clock replay bench passes.
 - Deterministic workload record/replay gate passes for the supported tier.
 - User docs state exactly what is deterministic and what is not.
+
+Concrete R/R-1 implementation slices:
+
+1. **Task-owned session start.**
+   Add a task-scoped record/replay runner or kselftest harness so the task
+   whose KVM v2 state is snapshotted is also the task that executes the
+   deterministic workload. The debugfs singleton can remain for inspection,
+   but it cannot be the only proof because its current writer-task semantics
+   do not represent a workload replay ABI.
+
+2. **Versioned event format.**
+   Keep the existing syscall and time-travel records, but make the supported
+   R/R-1 log shape explicit enough to survive code review: event type, syscall
+   number, selected arguments, return value, payload length, payload bytes
+   where needed, clock anchor, flags, and overflow state. A replay mismatch
+   must preserve enough cursor/status information for the selftest to explain
+   what diverged.
+
+3. **Payload copyout support.**
+   Syscalls that only return scalars are not enough for a credible replay
+   claim. R/R-1 needs payload handling for the bounded workload's selected
+   copyout syscalls, or the workload must explicitly avoid such syscalls and
+   the docs must say so. The preferred path is payload support for a small
+   reviewed set rather than a fake no-copyout demo.
+
+4. **Time policy.**
+   UML time-travel clock events already round-trip through the record log.
+   R/R-1 must also define raw host time, vvar, and RDTSC behavior. The safe
+   first-tier answer is to route supported time observations through recorded
+   syscall/event payloads and fail closed or disable unsupported vvar/RDTSC
+   paths in strict replay until a stronger implementation lands.
+
+5. **Signal policy.**
+   R/R-1 must define whether asynchronous signal delivery is unsupported,
+   blocked during the deterministic gate, or recorded with explicit siginfo and
+   delivery-order events. If the first tier excludes SIGALRM and host-injected
+   signals, strict replay must detect and report that exclusion rather than
+   silently falling back to live behavior.
+
+6. **Device and randomness policy.**
+   Network, block, hostfs mutation, and randomness are not allowed to be
+   implicit best-effort behavior. Either record the selected payloads for the
+   deterministic workload, or reject those operations in strict replay. Keep
+   vector2/Tier 3 workloads outside the R/R-1 completion claim unless their
+   device payload policy is implemented.
+
+7. **Deterministic workload selftest.**
+   Add a selftest that records a bounded workload, restores the task snapshot,
+   replays the log, verifies the same user-visible result, and also exercises
+   at least one strict divergence path. The test should fail if replay merely
+   re-executes live syscalls or if it snapshots the wrong task.
+
+8. **Documentation and status update.**
+   Update debugfs docs, Kconfig help, the inventory, and `STATUS.md` with the
+   exact R/R-1 contract. If R/R-1 remains experimental after implementation,
+   the final completion note must say record/replay is present as an
+   experimental tier and list the unsupported operations.
 
 ### 3. Snapshot, Fork-Server, And Pool Closure
 
@@ -443,10 +553,10 @@ Current state:
 - Profile config matrix exists.
 - KASAN, KFENCE, KCSAN, KCOV, kprobes, ftrace, and BPF/JIT have focused
   validation evidence.
-- KMSAN profile configuration and a clean LLVM `uml/research-kmsan` build
-  exist. The vmalloc metadata range alignment bug is fixed on `next`, but the
-  runtime smoke still fails before its result marker with early KMSAN reports
-  in kthread-name, scheduler, credential, and stack/string metadata paths.
+- KMSAN profile configuration, a clean LLVM `uml/research-kmsan` build, and
+  runtime smoke evidence are present. The current KMSAN gate reaches
+  `KMSAN_SMOKE: PASS runtime=y reproducer=n`; rerun it in the final matrix to
+  protect the closure after later KVM/vector2/profile changes.
 - KGDB is deferred-not-present: the current tree does not select
   `HAVE_ARCH_KGDB`, no live UML profile fragment enables `CONFIG_KGDB`, and
   the active profile docs no longer claim KGDB as available.
@@ -458,7 +568,7 @@ Remaining tasks:
 - Keep KGDB out of current feature claims unless a future slice implements
   UML `HAVE_ARCH_KGDB`, backend register access, transport support, and a
   smoke test.
-- Finish KMSAN runtime validation or document the exact blocker.
+- Rerun KMSAN runtime validation as a regression gate.
 - Keep ftrace claims bounded to supported tracing modes.
 - Ensure `umlbuild` profiles and kernel Kconfig profiles do not drift.
 
@@ -581,7 +691,7 @@ The final completion note must include:
 | W3 | Record/replay completion or explicit experimental exclusion | Open | Yes | Supported replay tier passes, or exclusion is approved and documented. |
 | W4 | Fork-server, pool, daemon exec, and syzkaller path | Mostly closed | Yes | Full pool/syzkaller smoke set passes on final KVM/vector2 stack. |
 | W5 | Vector2 publication readiness | Open | Yes | Seccomp and KVM v2 Tier 3 gates plus multiqueue/fairness evidence pass. |
-| W6 | Profiles and instrumentation | Open | Yes | All profile builds and runtime probes pass, including KMSAN/KGDB disposition. |
+| W6 | Profiles and instrumentation | Open | Yes | All profile builds and runtime probes pass, including KMSAN rerun and KGDB disposition. |
 | W7 | Active code/comment/doc cleanup | Open continuous | Yes | Focused scans reviewed and active surfaces are free of random history. |
 | W8 | Upstream queue refresh | Open | No for local completion, yes for publication | Submission queue and patch boundaries regenerated from final `next`. |
 | W9 | Final integration gate | Open | Yes | Full gate passes and final status/inventory are updated. |
@@ -606,29 +716,26 @@ detour:
 
 1. Start every slice from clean, pushed `next` at `origin/next`, and record the
    `torvalds/master...next` count before making claims about upstream currency.
-2. Reproduce the current KMSAN runtime smoke failure on the latest `next` with
-   a clean LLVM `uml/research-kmsan` build, then either land a narrow
-   UML-local runtime fix or strengthen the blocker note with current-commit
-   evidence and a precise next investigation target.
-3. Decide the record/replay completion tier in writing. If it remains part of
-   the original completion claim, implement the missing determinism policy and
-   workload gate. If it stays experimental, record the exclusion and remove any
-   active user-facing language that implies supported deterministic replay.
-4. Finish vector2 publication evidence: natural 7200-second seccomp Tier 3,
+2. Implement the R/R-1 record/replay tier described above. The first slice is
+   task-owned session start, because the current debugfs writer-task model
+   proves live recording but not deterministic workload replay. Then land the
+   payload, time, signal, device, strict-divergence, selftest, and
+   documentation slices in order.
+3. Finish vector2 publication evidence: natural 7200-second seccomp Tier 3,
    full KVM-v2 Tier 3 networking coverage, and multiqueue fairness/performance.
    Keep v2 opt-in until those gates justify stronger language.
-5. Re-run the pool, fork-server, daemon exec, and syzkaller smoke set on the
+4. Re-run the pool, fork-server, daemon exec, and syzkaller smoke set on the
    final KVM/vector2 stack. Keep `exec/1` as the supported ABI unless a separate
    `exec/2` kernel argv transport is deliberately implemented and tested.
-6. Complete profile and instrumentation closure: all kernel profile builds,
-   runtime profile probes, focused sanitizer/instrumentation smokes, KMSAN
-   disposition, and KGDB exclusion or implementation.
-7. Run the active-source cleanup scans over `arch/um`, UML selftests,
+5. Complete profile and instrumentation closure: all kernel profile builds,
+   runtime profile probes, focused sanitizer/instrumentation smokes, the KMSAN
+   regression rerun, and KGDB exclusion or implementation.
+6. Run the active-source cleanup scans over `arch/um`, UML selftests,
    `uml-launcher`, non-redesign UML docs, live status docs, and current
    sequencing/future-phase trackers. Rewrite active comments into normal kernel
    style and move useful history to clearly archival docs.
-8. Regenerate upstream patch-series planning from the final branch shape,
+7. Regenerate upstream patch-series planning from the final branch shape,
    after implementation and cleanup stabilize.
-9. Run the final integration gate, update `STATUS.md`, update the inventory,
+8. Run the final integration gate, update `STATUS.md`, update the inventory,
    write the final completion note with pass/fail/skip and deferred/retired
    items, commit, push, and verify `next == origin/next`.
