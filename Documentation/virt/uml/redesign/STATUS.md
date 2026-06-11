@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC/RDTSCP fault evidence, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC/RDTSCP fault evidence, current-branch umlctl operational confirmation, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -618,8 +618,20 @@ Remaining pool/vector2 boundary:
 The active launcher and build tooling is validated on `next` for the core
 developer-facing paths:
 
-- `cargo fmt --check` and `cargo test` pass in `tools/uml/uml-launcher`;
+- `cargo fmt --check`, `cargo test`, and
+  `make -C tools/uml/uml-launcher check` pass in
+  `tools/uml/uml-launcher`;
+- `cargo build --bins` and `cargo build --release --bins` produce current
+  debug and release `umlctl` binaries;
+- an isolated current-branch lifecycle smoke against `./linux` passes through
+  `umlctl create`, `start`, `ps`, `metrics`, `stop`, and `rm`, with no
+  remaining files in the temporary state/runtime directories;
 - `umlctl-smoke` and `launcher-smoke` pass against the current build;
+- with `UM_FORK_KERNEL=$PWD/linux`, `pool-serve-smoke`, `pool-exec-smoke`,
+  `pool-port-forward-smoke`, and `syzkaller-shim-smoke` pass against the
+  current branch. The same tests can fail if they fall back to stale external
+  fork-kernel artifacts under `$HOME/src/uml-builds`, so current-branch
+  validation should pin `UM_FORK_KERNEL` to the rebuilt branch binary;
 - `umlctl gate run --dry-run` passes against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`;
 - `run-bpftrace-validate.sh` attaches all five transparency scripts, with
