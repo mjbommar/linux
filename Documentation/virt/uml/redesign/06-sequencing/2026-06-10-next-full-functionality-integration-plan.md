@@ -117,10 +117,11 @@ The active blockers are now:
    networking gates still need host-to-guest small-transfer follow-up,
    multiqueue/fairness, Tier 3 seccomp, KVM v2 coverage, and full CPU/syscall
    publication evidence. The fixed-byte helper now appends per-process
-   endpoint CPU timing and host-to-guest UML process metric deltas for focused
-   diagnostics, and the RX repoll follow-up reduces vector2 interrupt/poll
-   churn on the 1 MiB host-to-guest cell, but small-transfer throughput and
-   the stronger CPU-utilisation/syscall-rate gates remain open.
+   endpoint CPU timing, host-to-guest UML process metric deltas, and
+   transfer-window perf aggregate/comparison TSVs for focused diagnostics, and
+   the RX repoll follow-up reduces vector2 interrupt/poll churn on the 1 MiB
+   host-to-guest cell, but small-transfer throughput and the stronger
+   CPU-utilisation/syscall-rate gates remain open.
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
@@ -980,9 +981,9 @@ Acceptance gates:
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
   subtree-wide syscall and CPU counters per driver, and the helper can now
-  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv`;
-  steady-state CPU-utilisation and syscall-rate measurements remain open
-  publication work.
+  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv` plus
+  `perf-window-aggregate.tsv` and `perf-window-comparison.tsv`; steady-state
+  CPU-utilisation and syscall-rate measurements remain open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch
@@ -1066,10 +1067,11 @@ Acceptance gates:
 - `cargo test`
 - launcher smoke. Current status: PASS on 2026-06-10 through
   `umlctl-smoke` and `launcher-smoke`.
-- deploy smoke. Current status: PASS on 2026-06-10. The current and
-  historical `umlctl-deploy` example/profile file sets match, all 18 example
-  Umlfiles pass `UML_KERNEL=$PWD/linux umlctl up --dry-run`, and all 5
-  built-in profiles resolve with `umlbuild profile show`.
+- deploy smoke. Current status: PASS on 2026-06-11. The current and
+  historical `umlctl-deploy` example/profile file sets match, all 22 example
+  Umlfiles use the current `umlctl up` schema and pass
+  `UML_KERNEL=$PWD/linux umlctl up --dry-run`, and all 5 built-in profiles
+  resolve with `umlbuild profile show`.
 - gate dry run. Current status: PASS on 2026-06-10 through
   `umlctl gate run --dry-run` against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`.
@@ -1253,9 +1255,8 @@ Current state:
   `substrate`, `python`, and `performance` instead of chronology labels.
 - Validation passed with `cargo fmt --check`, `cargo test`, `python3 -m
   py_compile` for touched tier smoke scripts, `umlctl gate list --source-root
-  .`, `umlctl gate run --dry-run` for all gate TOMLs, `uml-launcher run
-  --dry-run --config` for touched legacy launcher examples, and
-  `git diff --check`.
+  .`, `umlctl gate run --dry-run` for all gate TOMLs, `umlctl up --dry-run`
+  for touched Umlfiles, and `git diff --check`.
 - A focused scan over `arch/um`, `tools/testing/selftests/um`, and
   `tools/uml/uml-launcher` now reports no standalone workstream, decision,
   memo, or phase-label patterns after excluding operational post-mortem
@@ -1634,9 +1635,9 @@ Runtime smoke:
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
   subtree-wide syscall and CPU counters per driver, and the helper can now
-  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv`;
-  steady-state CPU-utilisation and syscall-rate measurements remain open
-  publication work.
+  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv` plus
+  `perf-window-aggregate.tsv` and `perf-window-comparison.tsv`; steady-state
+  CPU-utilisation and syscall-rate measurements remain open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch

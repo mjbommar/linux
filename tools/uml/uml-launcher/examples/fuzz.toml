@@ -1,27 +1,45 @@
-# uml-launcher config for the fuzz profile.
+# umlctl Umlfile for fuzz-profile kernels.
 #
-# Pair this with:
+# Pair with:
 #   make ARCH=um uml/fuzz
 #   make ARCH=um O=/tmp/uml-fuzz -j$(nproc)
 #
-# The fuzz profile selects CONFIG_UM_SNAPSHOT_FORKSERVER=y so the
-# kernel speaks the AFL-compatible 12-byte wire protocol on fds
-# 198/199 when a harness plumbs them in.
-#
-# Invoke:
-#   # Fuzzer opens its pipes, hands the fds to the launcher:
-#   exec 3<>/path/to/ctl  4<>/path/to/status
-#   uml-launcher run --config ~/.config/uml-launcher/fuzz.toml \
-#                    --forkserver 3,4
-#
-# --forkserver must be a CLI flag, not a TOML field, because the
-# fd numbers are per-invocation. Everything else lives here.
+# The profile selects the fuzzing-oriented kernel config. This Umlfile provides
+# a small hostfs guest environment and a stable ready marker for harness smoke
+# runs. Fork-server pool testing is driven by the dedicated selftests and
+# `umlctl pool` commands, not by an inline Umlfile fd setting.
 
-kernel = "/tmp/uml-fuzz/linux"
-init   = "/usr/local/bin/fuzz-ready.sh"
-mem    = "128M"
-root   = "hostfs"
-console = "null"
+schema_version = 1
 
-# Appended verbatim to the synthesized UML command-line.
-# append  = ["quiet"]
+[instance]
+name = "uml-fuzz"
+labels = { profile = "fuzz", purpose = "fuzz-harness" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "128M"
+ncpus = 1
+root = "hostfs"
+
+[network]
+mode = "none"
+
+[[init.phases]]
+name = "ready"
+cmd = """
+if [ -x /usr/local/bin/fuzz-ready.sh ]; then
+  exec /usr/local/bin/fuzz-ready.sh
+fi
+echo UML_FUZZ_READY
+sleep infinity
+"""
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = true

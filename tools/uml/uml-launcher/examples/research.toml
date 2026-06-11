@@ -1,20 +1,37 @@
-# uml-launcher config for the research profile.
+# umlctl Umlfile for the research profile.
 #
-# The research profile turns on the debug + introspection stack —
-# KASAN, KFENCE, ftrace, kprobes, BPF JIT — for hands-on kernel
-# feature work. KCOV is intentionally OFF in this profile; use
-# uml/fuzz or uml/fuzz-deep when you need KCOV.
-# Slower boot than fuzz; not appropriate for production.
+# The research profile enables debug and introspection facilities such as
+# KASAN, KFENCE, ftrace, kprobes, and BPF JIT. Run with --foreground for an
+# interactive shell:
 #
-# Pair this with:
-#   make ARCH=um uml/research
-#   make ARCH=um O=/tmp/uml-research -j$(nproc)
-#
-# Invoke interactively:
-#   uml-launcher -v run --config ~/.config/uml-launcher/research.toml
+#   UML_KERNEL=/tmp/uml-research/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/research.toml --foreground
 
-kernel = "/tmp/uml-research/linux"
-init   = "/bin/sh"
-mem    = "512M"
-root   = "hostfs"
-console = "stdio"
+schema_version = 1
+
+[instance]
+name = "uml-research"
+labels = { profile = "research", purpose = "debugging" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "512M"
+ncpus = 1
+root = "hostfs"
+
+[network]
+mode = "none"
+
+[[init.phases]]
+name = "shell"
+cmd = "exec /bin/sh -i"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = true

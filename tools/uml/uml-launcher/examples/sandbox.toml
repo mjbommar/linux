@@ -1,20 +1,35 @@
-# uml-launcher config for the sandbox profile.
+# umlctl Umlfile for the sandbox profile.
 #
-# In v1 this runs the sandbox-profile kernel under a single
-# launcher process with no per-device isolation — the kernel is
-# built with tight Kconfig but the host attack surface is the
-# same as any UML process.
-#
-# Per-device vhost-user helpers, seccomp filters, and LSM policy
-# provide the host isolation boundary. This example keeps only the
-# launch knobs; helper-specific settings live in backend configs.
-#
-# Pair with:
-#   make ARCH=um uml/sandbox
-#   make ARCH=um O=/tmp/uml-sandbox -j$(nproc)
+# Pair with a kernel built from `make ARCH=um uml/sandbox`. The kernel profile
+# tightens the guest config; host isolation still comes from explicit launcher
+# and backend controls such as vector2 fd handoff, seccomp, cgroups, and LSM
+# policy.
 
-kernel = "/tmp/uml-sandbox/linux"
-init   = "/bin/sh"
-mem    = "256M"
-root   = "hostfs"
-console = "stdio"
+schema_version = 1
+
+[instance]
+name = "uml-sandbox"
+labels = { profile = "sandbox", purpose = "sandbox-profile" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "256M"
+ncpus = 1
+root = "hostfs"
+
+[network]
+mode = "none"
+
+[[init.phases]]
+name = "shell"
+cmd = "exec /bin/sh -i"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = true

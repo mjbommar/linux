@@ -850,9 +850,11 @@ The helper now has an opt-in host-to-guest perf window:
 When enabled for host-to-guest runs, the helper resolves the live UML PID from
 the pre-transfer `umlctl metrics --json` sample, runs `sudo -n perf stat -p
 <pid>` for the bounded window, and writes parsed rows to `perf-window.tsv`.
-Default runs still leave `summary.tsv`, `aggregate.tsv`, and `comparison.tsv`
-unchanged; `perf-window.tsv` records `NA` fields when perf is disabled or a
-direction is not covered.
+It also writes `perf-window-aggregate.tsv` with per-driver medians and
+`perf-window-comparison.tsv` with vector2/vector median ratios. Default runs
+still leave `summary.tsv`, `aggregate.tsv`, and `comparison.tsv` unchanged;
+`perf-window.tsv` records `NA` fields when perf is disabled or a direction is
+not covered.
 
 Validation:
 
@@ -873,7 +875,7 @@ UML_VECTOR_PERF_PERF_STAT=1 \
     --kernel "$PWD/linux"
 ```
 
-Result: both drivers passed, `perf-window.tsv` had 20 fields in the header and
+Result: both drivers passed, `perf-window.tsv` had 21 fields in the header and
 both data rows, both raw `perf-stat.csv` files were non-empty, and cleanup
 checks found no stale `vperf-*`/TAP links and no live matching UML or `umlctl`
 processes.
@@ -889,6 +891,56 @@ This is closer to the P4.3 shape than the subtree-wide smoke because it excludes
 the `umlctl up` path and most boot/setup cost.  It is still a short smoke at a
 single tiny transfer size, not the final same-throughput steady-state CPU and
 syscall-rate comparison.
+
+Aggregate-output validation:
+
+```sh
+rm -rf /tmp/um-vector-perf-window-aggregate-default-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-window-aggregate-default-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=guest-to-host \
+UML_VECTOR_PERF_PROTOCOL=tcp \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19188 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+
+rm -rf /tmp/um-vector-perf-window-aggregate-h2g-1m-r2
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-window-aggregate-h2g-1m-r2 \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_PROTOCOL=tcp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_PORT=19189 \
+UML_VECTOR_PERF_PERF_STAT=1 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+The no-perf smoke wrote `perf-window-aggregate.tsv` with `NA` perf medians and
+an empty comparison body, proving default runs keep a stable shape.  The
+two-driver 1 MiB host-to-guest perf smoke wrote real aggregate and comparison
+rows:
+
+| Driver | Repeats | Total syscall median | Task-clock ms median | CPU-clock ms median | Context switch median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| vector | 2 | 2,772.5 | 27.16 | 20.755 | 210.5 |
+| vector2 | 2 | 60,901.0 | 957.10 | 839.325 | 5,711.0 |
+
+Selected vector2/vector median ratios from `perf-window-comparison.tsv`:
+
+| Metric | Ratio |
+| --- | ---: |
+| total syscalls | 21.966096 |
+| task-clock ms | 35.239323 |
+| CPU-clock ms | 40.439653 |
+| context switches | 27.130641 |
+
+This proves the publication artifact shape for repeated perf-window runs. It
+does not close the P4.3 CPU/syscall publication gate because the run is short,
+single-host, and not normalized to a same-throughput steady-state workload.
 
 ## 1 MiB Host-To-Guest Metric Diagnostic: 2026-06-11
 

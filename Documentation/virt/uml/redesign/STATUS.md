@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -667,12 +667,18 @@ Current boundary:
   CPU/syscall publication gate.
 - The fixed-byte helper now has opt-in host-to-guest UML-PID perf collection
   for a bounded post-readiness transfer window.  With
-  `UML_VECTOR_PERF_PERF_STAT=1`, it writes parsed rows to `perf-window.tsv`.
+  `UML_VECTOR_PERF_PERF_STAT=1`, it writes parsed rows to `perf-window.tsv`
+  plus `perf-window-aggregate.tsv` and `perf-window-comparison.tsv`.
   A two-second 64 KiB host-to-guest TCP smoke passed for both drivers: legacy
   vector recorded 85,743 total syscalls, 1,195.24 ms task-clock, and 9,895
   context switches; vector2 recorded 65,186 total syscalls, 984.71 ms
   task-clock, and 6,582 context switches.  This excludes most boot/setup cost
   but remains a short smoke, not the final same-throughput steady-state gate.
+  A follow-up two-repeat 1 MiB host-to-guest TCP run validated the aggregate
+  files with real perf rows: median syscall counts were 2,772.5 for vector and
+  60,901.0 for vector2, and median task-clock was 27.16 ms for vector and
+  957.10 ms for vector2. The result proves the publication artifact shape,
+  not the final CPU/syscall-rate claim.
 
 The 2026-06-11 pool/fork/syzkaller rerun is focused current-HEAD regression
 evidence. The latest syzkaller-only rerun covers `e3a493eac9e5`. It does not
@@ -712,8 +718,9 @@ developer-facing paths:
 - `run-bpftrace-validate.sh` attaches all five transparency scripts, with
   syscalls and sched producing idle UML data;
 - historical `umlctl-deploy` comparison found no missing example or profile
-  TOML files; all 18 example Umlfiles pass `umlctl up --dry-run` with the
-  current `./linux` build, and all 5 built-in profiles resolve with
+  TOML files; all 22 example Umlfiles now use the current `umlctl up` schema
+  and pass `UML_KERNEL=$PWD/linux umlctl up --dry-run` with the current
+  `./linux` build, and all 5 built-in profiles resolve with
   `umlbuild profile show`; and
 - `run-umlbuild-mvp.sh` passes when `UMLBUILD_SOURCE` points at a clean
   temporary source worktree and the already-built debug `umlbuild`/`umlctl`

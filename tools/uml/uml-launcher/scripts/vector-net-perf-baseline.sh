@@ -40,6 +40,8 @@ Environment overrides:
 Outputs:
   summary.tsv       raw per-run rows
   perf-window.tsv   optional host-to-guest transfer-window perf stat rows
+  perf-window-aggregate.tsv per-driver medians for perf-window.tsv
+  perf-window-comparison.tsv vector2/vector ratios for perf-window.tsv
   aggregate.tsv     per-driver median/best throughput and median CPU/scheduler data
   comparison.tsv    vector2/vector ratios when both drivers are present
 EOF
@@ -217,7 +219,7 @@ mkdir -p "$out"
 summary="$out/summary.tsv"
 perf_summary="$out/perf-window.tsv"
 printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\tguest_cpu_seconds\thost_cpu_seconds\tuml_user_cpu_seconds\tuml_system_cpu_seconds\tuml_sched_run_seconds\tuml_sched_wait_seconds\tuml_sched_pcount_delta\tuml_voluntary_ctxt_switches_delta\tuml_involuntary_ctxt_switches_delta\tuml_metrics_before_log\tuml_metrics_after_log\n' > "$summary"
-printf 'driver\tdirection\tbytes\trepeat\tperf_stat_log\tperf_syscalls_total\tperf_task_clock_ms\tperf_cpu_clock_ms\tperf_context_switches\tperf_cpu_migrations\tperf_page_faults\tperf_cycles\tperf_instructions\tperf_read\tperf_write\tperf_futex\tperf_ioctl\tperf_recvmsg\tperf_sendmsg\tperf_poll\n' > "$perf_summary"
+printf 'driver\tdirection\tbytes\trepeat\tprotocol\tperf_stat_log\tperf_syscalls_total\tperf_task_clock_ms\tperf_cpu_clock_ms\tperf_context_switches\tperf_cpu_migrations\tperf_page_faults\tperf_cycles\tperf_instructions\tperf_read\tperf_write\tperf_futex\tperf_ioctl\tperf_recvmsg\tperf_sendmsg\tperf_poll\n' > "$perf_summary"
 
 queue_toml() {
 	local driver="$1"
@@ -573,14 +575,24 @@ PY
 write_aggregate_summaries() {
 	local aggregate="$out/aggregate.tsv"
 	local comparison="$out/comparison.tsv"
+	local perf_aggregate="$out/perf-window-aggregate.tsv"
+	local perf_comparison="$out/perf-window-comparison.tsv"
 
-	python3 - "$summary" "$aggregate" "$comparison" <<'PY'
+	python3 - "$summary" "$aggregate" "$comparison" "$perf_summary" \
+		"$perf_aggregate" "$perf_comparison" <<'PY'
 import csv
 import statistics
 import sys
 from collections import defaultdict
 
-summary_path, aggregate_path, comparison_path = sys.argv[1:]
+(
+    summary_path,
+    aggregate_path,
+    comparison_path,
+    perf_summary_path,
+    perf_aggregate_path,
+    perf_comparison_path,
+) = sys.argv[1:]
 
 with open(summary_path, encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
@@ -750,6 +762,93 @@ with open(comparison_path, "w", encoding="utf-8", newline="") as f:
                 )
             ),
         })
+
+with open(perf_summary_path, encoding="utf-8") as f:
+    perf_rows = list(csv.DictReader(f, delimiter="\t"))
+
+perf_metrics = [
+    "perf_syscalls_total",
+    "perf_task_clock_ms",
+    "perf_cpu_clock_ms",
+    "perf_context_switches",
+    "perf_cpu_migrations",
+    "perf_page_faults",
+    "perf_cycles",
+    "perf_instructions",
+    "perf_read",
+    "perf_write",
+    "perf_futex",
+    "perf_ioctl",
+    "perf_recvmsg",
+    "perf_sendmsg",
+    "perf_poll",
+]
+
+perf_grouped = defaultdict(list)
+for row in perf_rows:
+    perf_grouped[(row["protocol"], row["direction"], row["bytes"], row["driver"])].append(row)
+
+perf_aggregate_fields = [
+    "protocol",
+    "direction",
+    "bytes",
+    "driver",
+    "repeats",
+] + [f"{metric}_median" for metric in perf_metrics]
+
+with open(perf_aggregate_path, "w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=perf_aggregate_fields, delimiter="\t")
+    writer.writeheader()
+    for protocol, direction, byte_count, driver in sorted(perf_grouped):
+        group = perf_grouped[(protocol, direction, byte_count, driver)]
+        row = {
+            "protocol": protocol,
+            "direction": direction,
+            "bytes": byte_count,
+            "driver": driver,
+            "repeats": len(group),
+        }
+        for metric in perf_metrics:
+            row[f"{metric}_median"] = fmt(median(group, metric))
+        writer.writerow(row)
+
+perf_comparison_fields = [
+    "protocol",
+    "direction",
+    "bytes",
+    "baseline_driver",
+    "candidate_driver",
+    "baseline_repeats",
+    "candidate_repeats",
+] + [f"{metric}_median_ratio" for metric in perf_metrics]
+
+perf_by_shape = defaultdict(dict)
+for (protocol, direction, byte_count, driver), group in perf_grouped.items():
+    perf_by_shape[(protocol, direction, byte_count)][driver] = group
+
+with open(perf_comparison_path, "w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=perf_comparison_fields, delimiter="\t")
+    writer.writeheader()
+    for protocol, direction, byte_count in sorted(perf_by_shape):
+        drivers = perf_by_shape[(protocol, direction, byte_count)]
+        if "vector" not in drivers or "vector2" not in drivers:
+            continue
+        base = drivers["vector"]
+        candidate = drivers["vector2"]
+        row = {
+            "protocol": protocol,
+            "direction": direction,
+            "bytes": byte_count,
+            "baseline_driver": "vector",
+            "candidate_driver": "vector2",
+            "baseline_repeats": len(base),
+            "candidate_repeats": len(candidate),
+        }
+        for metric in perf_metrics:
+            row[f"{metric}_median_ratio"] = fmt(
+                ratio(median(candidate, metric), median(base, metric))
+            )
+        writer.writerow(row)
 PY
 }
 
@@ -1138,8 +1237,8 @@ EOF
 		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" \
 		"$guest_cpu_seconds" "$host_cpu_seconds" $metrics_fields \
 		"$metrics_before_log" "$metrics_after_log" >> "$summary"
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$perf_log_field" \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$protocol" "$perf_log_field" \
 		"$perf_stat_fields" >> "$perf_summary"
 	echo "$guest_line"
 	echo "$host_line"
@@ -1165,3 +1264,5 @@ echo "summary: $summary"
 write_aggregate_summaries
 echo "aggregate: $out/aggregate.tsv"
 echo "comparison: $out/comparison.tsv"
+echo "perf-window-aggregate: $out/perf-window-aggregate.tsv"
+echo "perf-window-comparison: $out/perf-window-comparison.tsv"
