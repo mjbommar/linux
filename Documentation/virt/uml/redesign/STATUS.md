@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -23,10 +23,11 @@ restored for the full UML v2 completion branch:
 - the validation needed to decide which pieces are publishable upstream.
 
 Private state-trace code remains historical-only at this point. Record/replay
-now has an experimental Kconfig-gated core in `next`, but live deterministic
-runtime replay is not complete. Generic UML snapshot and fork-server work
-remains separate from the KVM backend core unless the integration plan
-explicitly pulls it into `next`.
+now has an experimental Kconfig-gated core in `next`, including a debugfs
+control/status surface and live syscall-record smoke coverage, but live
+deterministic runtime replay is not complete. Generic UML snapshot and
+fork-server work remains separate from the KVM backend core unless the
+integration plan explicitly pulls it into `next`.
 
 ## Current Readiness
 
@@ -45,9 +46,10 @@ Current source-tree direction:
   gated to one online CPU.
 - KVM v2 record/replay has an experimental core on `next` behind
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; its live syscall
-  dispatcher hook can observe and replay syscall return values, but snapshot,
-  time, signal, device, and user-ABI integration remain incomplete. Private
-  trace-ring sources have not yet been reimported.
+  dispatcher hook can observe and replay syscall return values, and debugfs can
+  start/stop/reset a singleton record container for validation. Snapshot,
+  time, signal, device, and deterministic replay policy remain incomplete.
+  Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
   backend unless KVM v2 is selected.
@@ -101,6 +103,9 @@ The strongest current KVM v2 evidence is:
   synthetic gadget-bypass page helper. The live KVM syscall dispatcher now
   calls the observe/consume hooks, so this is no longer core-only syscall
   plumbing.
+- Experimental live record smoke: `kvm-record-smoke` passes through the
+  debugfs control surface, recording 2379 live KVM v2 syscall entries with
+  190320 bytes used and 0 drops.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 
@@ -116,8 +121,8 @@ Remaining validation before publication or completion:
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
   stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
-- finish record/replay snapshot, time, signal, device, and user-ABI integration
-  before counting the original record/replay mission complete;
+- finish record/replay snapshot, time, signal, device, and deterministic replay
+  policy before counting the original record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.
@@ -364,8 +369,9 @@ KVM-specific record/replay is present as an experimental core with KUnit
 coverage. Gadget-handled syscalls now have record/replay bypass plumbing: the
 active record static key synchronizes a per-vCPU gadget-state byte, and the
 LSTAR gadget falls back to the host dispatcher when that byte is set. Live
-syscall interception, snapshot integration, time/RDTSC/signal determinism,
-and workload-level replay smokes remain open.
+syscall recording is now covered by the `kvm-record-smoke` debugfs test.
+Snapshot integration, time/RDTSC/signal determinism, and workload-level replay
+smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

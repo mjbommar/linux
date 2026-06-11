@@ -755,9 +755,11 @@ struct kvm_v2_record {
 
 DECLARE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled);
 
+const char *kvm_v2_record_state_name(enum kvm_v2_record_state state);
 struct kvm_v2_record *kvm_v2_record_alloc(size_t buffer_size);
 void kvm_v2_record_destroy(struct kvm_v2_record *rec);
 void kvm_v2_record_free(struct kvm_v2_record *rec);
+int kvm_v2_record_reset(struct kvm_v2_record *rec);
 int kvm_v2_record_start(struct kvm_v2_record *rec);
 int kvm_v2_record_stop(struct kvm_v2_record *rec);
 int kvm_v2_record_replay(struct kvm_v2_record *rec);

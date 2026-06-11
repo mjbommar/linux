@@ -639,18 +639,25 @@ Current `next` checkpoint:
   so gadget-handled syscalls cannot disappear from the future dispatcher log.
 - `arch/um/backend/kvm-v2/test_record.c` validates the experimental core and
   the synthetic gadget-bypass page helper without requiring a live vCPU.
+- `arch/um/backend/kvm-v2/record.c` now exposes the experimental debugfs
+  singleton control/status files `kvm_v2_record_ctl` and
+  `kvm_v2_record_status`. They drive `start`, `stop`, `replay`, `strict`, and
+  `destroy` for validation while keeping replay clearly outside the supported
+  deterministic workload claim.
 - Validation on 2026-06-10 after gadget-bypass wiring: `make ARCH=um -j16`,
   `um_kvm_v2_record` 8/8, `kvm_v2_byteshape` 9/9, both record and byteshape
   filters also PASS under `backend=force=kvm`, and the freestanding KVM
   `perf-getpid` gadget smoke remains PASS with `cyc_per_call=89`.
+- Validation on 2026-06-10 after debugfs control wiring:
+  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 8/8 and a live KVM v2
+  record run with 2379 syscall entries, 190320 bytes used, and 0 drops.
 - Still open: snapshot integration, time/RDTSC/signal determinism, supported
-  replay tier docs, a supported user ABI/control surface, and real workload
-  record/replay smoke tests.
+  replay tier docs, and real deterministic workload replay smoke tests.
 
 Acceptance gates:
 
 - Record KUnit tests. Current status: PASS for the experimental core.
-- Record smoke test.
+- Record smoke test. Current status: PASS through `kvm-record-smoke`.
 - Replay smoke test.
 - Buffer overflow behavior test.
 - Gadget-on and gadget-off comparison. Current status: state-page bypass and
@@ -1428,7 +1435,7 @@ branch lands.
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
 | KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
-| Record/replay | Experimental syscall hook present; deterministic runtime incomplete | Complete deterministic tier or explicitly experimental | Partially closed; runtime open |
+| Record/replay | Experimental syscall hook, debugfs control, and live record smoke present; deterministic replay incomplete | Complete deterministic tier or explicitly experimental | Partially closed; replay runtime open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
@@ -1704,9 +1711,9 @@ Immediate engineering conclusion:
    `exec/2` work, not a current completion blocker.
 3. Keep the retired per-take pool fd handoff boundary covered in status docs;
    launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
-4. Complete record/replay beyond the explicit experimental syscall hook,
-   including snapshot, time, signal, device, user-ABI, and workload-level replay
-   gates, before counting the original mission complete.
+4. Complete record/replay beyond the explicit experimental syscall hook and
+   debugfs record control, including snapshot, time, signal, device, and
+   workload-level replay gates, before counting the original mission complete.
 5. Decide whether private state trace is worth importing as clean optional
    diagnostics.
 6. Re-audit vector2 transport claims, Kconfig wording, and replacement

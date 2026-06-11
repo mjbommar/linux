@@ -25,6 +25,8 @@ Layout
   │   ├── kfence_sample         (rw, 0600)  0|1
   │   ├── record_replay         (rw, 0600)  0|1
   │   └── perf_dispatch         (rw, 0600)  0|1
+  ├── kvm_v2_record_ctl     (wo, 0200)  experimental KVM v2 record control
+  ├── kvm_v2_record_status  (ro, 0400)  experimental KVM v2 record counters
   └── stats              (ro, 0400)  per-hook on-state + hit counter
 
 ``backend``
@@ -73,7 +75,8 @@ Gate semantics:
 
 ``record_replay``
     Fires at every gate site. Destined for the record-replay
-    subsystem.
+    subsystem. This is the generic hook bit; it does not allocate a
+    KVM v2 record container by itself.
 
 ``perf_dispatch``
     Fires on syscall entry and context switch. Feeds the kernel's
@@ -93,6 +96,54 @@ cumulative hit count since boot. Example on an idle system with
   kfence_sample        on=0 hits=0
   record_replay        on=0 hits=0
   perf_dispatch        on=0 hits=0
+
+KVM v2 record controls
+======================
+
+When ``CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`` and
+``CONFIG_DEBUG_FS=y``, the KVM v2 backend also exposes an experimental
+record container control surface:
+
+``kvm_v2_record_ctl``
+    Write-only command file. Supported commands are::
+
+      start [bytes]
+      stop
+      replay
+      strict 0|1
+      destroy
+
+    ``start`` allocates the singleton debugfs record container on first
+    use and enables the KVM v2 record static key. ``bytes`` is optional;
+    the default buffer is 64 KiB and the maximum is 64 MiB. Once the
+    singleton exists, later ``start`` commands may only request a size
+    no larger than the existing buffer. ``stop`` disables the static key.
+    ``destroy`` stops an active session if needed and resets the
+    singleton to ``init`` state; the storage stays allocated for the
+    lifetime of the UML instance so no live dispatcher can observe freed
+    record memory. ``replay`` is available for the experimental core, but
+    deterministic workload replay is not yet a supported user workflow.
+
+``kvm_v2_record_status``
+    Read-only status and counters. Example after stopping a live record
+    run::
+
+      state: stopped
+      enabled: 0
+      strict: 1
+      buffer_size: 1048576
+      buffer_used: 190320
+      buffer_replayed: 0
+      sequence: 2379
+      entries_recorded: 2379
+      entries_replayed: 0
+      entries_dropped: 0
+      syscall_count: 2379
+
+The record path is still explicitly experimental. It can record live
+KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
+bypass path, but full deterministic replay still needs the snapshot,
+time, signal, and device policy described in the redesign plan.
 
 Cost impact
 ===========

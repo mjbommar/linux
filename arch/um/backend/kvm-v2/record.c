@@ -9,13 +9,16 @@
  */
 
 #include <linux/errno.h>
+#include <linux/debugfs.h>
 #include <linux/export.h>
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
 #include <sysdep/ptrace.h>
@@ -25,12 +28,30 @@
 
 #define KVM_V2_RECORD_DEFAULT_BUFFER	(64U * 1024U)
 #define KVM_V2_RECORD_MAX_BUFFER	(64U * 1024U * 1024U)
+#define KVM_V2_RECORD_CTL_MAX		96
 
 DEFINE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled);
 EXPORT_SYMBOL_GPL(um_kvm_v2_record_enabled);
 
 static DEFINE_SPINLOCK(um_kvm_v2_record_lock);
 static struct kvm_v2_record *um_kvm_v2_active_record;
+
+const char *kvm_v2_record_state_name(enum kvm_v2_record_state state)
+{
+	switch (state) {
+	case KVM_V2_RECORD_INIT:
+		return "init";
+	case KVM_V2_RECORD_RECORDING:
+		return "recording";
+	case KVM_V2_RECORD_STOPPED:
+		return "stopped";
+	case KVM_V2_RECORD_REPLAYING:
+		return "replaying";
+	default:
+		return "unknown";
+	}
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_state_name);
 
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on)
 {
@@ -75,6 +96,30 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->entries_dropped = 0;
 	rec->syscall_count = 0;
 }
+
+int kvm_v2_record_reset(struct kvm_v2_record *rec)
+{
+	int rc = 0;
+
+	if (!rec)
+		return -EINVAL;
+
+	mutex_lock(&rec->lock);
+	if (rec->state == KVM_V2_RECORD_RECORDING ||
+	    rec->state == KVM_V2_RECORD_REPLAYING) {
+		rc = -EBUSY;
+		goto out_unlock;
+	}
+
+	kvm_v2_record_reset_counters(rec);
+	rec->state = KVM_V2_RECORD_INIT;
+	rec->strict_replay = true;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_reset);
 
 struct kvm_v2_record *kvm_v2_record_alloc(size_t buffer_size)
 {
@@ -359,3 +404,229 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall);
+
+#ifdef CONFIG_DEBUG_FS
+
+static DEFINE_MUTEX(kvm_v2_record_debugfs_lock);
+static struct kvm_v2_record *kvm_v2_record_debugfs_rec;
+
+static int kvm_v2_record_debugfs_ensure(size_t buffer_size)
+{
+	if (kvm_v2_record_debugfs_rec) {
+		if (buffer_size &&
+		    buffer_size > kvm_v2_record_debugfs_rec->buffer_size)
+			return -E2BIG;
+		return 0;
+	}
+
+	kvm_v2_record_debugfs_rec = kvm_v2_record_alloc(buffer_size);
+	if (!kvm_v2_record_debugfs_rec)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static int kvm_v2_record_parse_size(char *arg, size_t *buffer_size)
+{
+	unsigned long long bytes;
+	int rc;
+
+	arg = skip_spaces(arg);
+	if (!*arg) {
+		*buffer_size = 0;
+		return 0;
+	}
+
+	rc = kstrtoull(arg, 0, &bytes);
+	if (rc < 0)
+		return rc;
+	if (!bytes || bytes > KVM_V2_RECORD_MAX_BUFFER)
+		return -EINVAL;
+
+	*buffer_size = (size_t)bytes;
+	return 0;
+}
+
+static int kvm_v2_record_parse_bool(char *arg, bool *value)
+{
+	arg = skip_spaces(arg);
+
+	if (!strcmp(arg, "0") || !strcmp(arg, "false") || !strcmp(arg, "off")) {
+		*value = false;
+		return 0;
+	}
+	if (!strcmp(arg, "1") || !strcmp(arg, "true") || !strcmp(arg, "on")) {
+		*value = true;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int kvm_v2_record_debugfs_destroy(void)
+{
+	struct kvm_v2_record *rec = kvm_v2_record_debugfs_rec;
+	enum kvm_v2_record_state state;
+	int rc;
+
+	if (!rec)
+		return 0;
+
+	mutex_lock(&rec->lock);
+	state = rec->state;
+	mutex_unlock(&rec->lock);
+
+	if (state == KVM_V2_RECORD_RECORDING ||
+	    state == KVM_V2_RECORD_REPLAYING) {
+		rc = kvm_v2_record_stop(rec);
+		if (rc < 0)
+			return rc;
+	}
+
+	return kvm_v2_record_reset(rec);
+}
+
+static int kvm_v2_record_debugfs_command(char *buf)
+{
+	char *cmd, *arg;
+	bool strict;
+	size_t buffer_size;
+	int rc;
+
+	cmd = strim(buf);
+	if (!*cmd)
+		return -EINVAL;
+
+	arg = strpbrk(cmd, " \t");
+	if (arg) {
+		*arg++ = '\0';
+		arg = skip_spaces(arg);
+	} else {
+		arg = cmd + strlen(cmd);
+	}
+
+	mutex_lock(&kvm_v2_record_debugfs_lock);
+
+	if (!strcmp(cmd, "start")) {
+		rc = kvm_v2_record_parse_size(arg, &buffer_size);
+		if (rc < 0)
+			goto out_unlock;
+		rc = kvm_v2_record_debugfs_ensure(buffer_size);
+		if (rc < 0)
+			goto out_unlock;
+		rc = kvm_v2_record_start(kvm_v2_record_debugfs_rec);
+	} else if (!strcmp(cmd, "stop")) {
+		if (!kvm_v2_record_debugfs_rec) {
+			rc = -ENOENT;
+			goto out_unlock;
+		}
+		rc = kvm_v2_record_stop(kvm_v2_record_debugfs_rec);
+	} else if (!strcmp(cmd, "replay")) {
+		if (!kvm_v2_record_debugfs_rec) {
+			rc = -ENOENT;
+			goto out_unlock;
+		}
+		rc = kvm_v2_record_replay(kvm_v2_record_debugfs_rec);
+	} else if (!strcmp(cmd, "destroy") || !strcmp(cmd, "reset")) {
+		rc = kvm_v2_record_debugfs_destroy();
+	} else if (!strcmp(cmd, "strict")) {
+		if (!kvm_v2_record_debugfs_rec) {
+			rc = -ENOENT;
+			goto out_unlock;
+		}
+		rc = kvm_v2_record_parse_bool(arg, &strict);
+		if (rc < 0)
+			goto out_unlock;
+		rc = kvm_v2_record_set_strict_replay(kvm_v2_record_debugfs_rec,
+						     strict);
+	} else {
+		rc = -EINVAL;
+	}
+
+out_unlock:
+	mutex_unlock(&kvm_v2_record_debugfs_lock);
+	return rc;
+}
+
+static ssize_t kvm_v2_record_ctl_write(struct file *file,
+				       const char __user *buf,
+				       size_t count, loff_t *ppos)
+{
+	char tmp[KVM_V2_RECORD_CTL_MAX];
+	size_t copy_n;
+	int rc;
+
+	if (!count)
+		return -EINVAL;
+
+	copy_n = min_t(size_t, count, sizeof(tmp) - 1);
+	if (copy_from_user(tmp, buf, copy_n))
+		return -EFAULT;
+	tmp[copy_n] = '\0';
+
+	rc = kvm_v2_record_debugfs_command(tmp);
+	return rc < 0 ? rc : (ssize_t)count;
+}
+
+static const struct file_operations kvm_v2_record_ctl_fops = {
+	.write = kvm_v2_record_ctl_write,
+};
+
+static int kvm_v2_record_status_show(struct seq_file *m, void *v)
+{
+	struct kvm_v2_record *rec;
+	bool enabled;
+
+	enabled = static_branch_unlikely(&um_kvm_v2_record_enabled);
+
+	mutex_lock(&kvm_v2_record_debugfs_lock);
+	rec = kvm_v2_record_debugfs_rec;
+	if (!rec) {
+		seq_puts(m, "state: none\n");
+		seq_printf(m, "enabled: %u\n", enabled ? 1 : 0);
+		mutex_unlock(&kvm_v2_record_debugfs_lock);
+		return 0;
+	}
+
+	mutex_lock(&rec->lock);
+	seq_printf(m, "state: %s\n", kvm_v2_record_state_name(rec->state));
+	seq_printf(m, "enabled: %u\n", enabled ? 1 : 0);
+	seq_printf(m, "strict: %u\n", rec->strict_replay ? 1 : 0);
+	seq_printf(m, "buffer_size: %zu\n", rec->buffer_size);
+	seq_printf(m, "buffer_used: %zu\n", rec->buffer_used);
+	seq_printf(m, "buffer_replayed: %zu\n", rec->buffer_replayed);
+	seq_printf(m, "sequence: %llu\n", rec->sequence);
+	seq_printf(m, "entries_recorded: %llu\n", rec->entries_recorded);
+	seq_printf(m, "entries_replayed: %llu\n", rec->entries_replayed);
+	seq_printf(m, "entries_dropped: %llu\n", rec->entries_dropped);
+	seq_printf(m, "syscall_count: %llu\n", rec->syscall_count);
+	mutex_unlock(&rec->lock);
+	mutex_unlock(&kvm_v2_record_debugfs_lock);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(kvm_v2_record_status);
+
+static int __init kvm_v2_record_debugfs_init(void)
+{
+	struct dentry *d;
+
+	if (!debugfs_initialized())
+		return 0;
+
+	d = debugfs_lookup("um", NULL);
+	if (!d) {
+		d = debugfs_create_dir("um", NULL);
+		if (IS_ERR(d))
+			return PTR_ERR(d);
+	}
+
+	debugfs_create_file("kvm_v2_record_ctl", 0200, d, NULL,
+			    &kvm_v2_record_ctl_fops);
+	debugfs_create_file("kvm_v2_record_status", 0400, d, NULL,
+			    &kvm_v2_record_status_fops);
+	return 0;
+}
+late_initcall_sync(kvm_v2_record_debugfs_init);
+
+#endif /* CONFIG_DEBUG_FS */
