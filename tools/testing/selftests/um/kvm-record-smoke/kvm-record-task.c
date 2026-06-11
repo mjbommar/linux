@@ -17,8 +17,10 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CTL_PATH	"/sys/kernel/debug/um/kvm_v2_record_ctl"
@@ -31,6 +33,26 @@
 #ifndef SYS_getcwd
 #define SYS_getcwd	79
 #endif
+
+#ifndef SYS_clock_gettime
+#define SYS_clock_gettime	228
+#endif
+
+#ifndef SYS_gettimeofday
+#define SYS_gettimeofday	96
+#endif
+
+#ifndef SYS_time
+#define SYS_time		201
+#endif
+
+struct workload_sample {
+	struct timespec ts;
+	struct timeval tv;
+	struct timezone tz;
+	long time_value;
+	long time_ret;
+};
 
 static int ensure_dir(const char *path)
 {
@@ -153,13 +175,16 @@ static int get_long(const char *key, long *out)
 	return 0;
 }
 
-static long scalar_workload(void)
+static long deterministic_workload(struct workload_sample *sample)
 {
 	struct utsname uts;
 	char cwd[256];
 	long sink = 0;
 	long cwd_len;
+	long rc;
 	int i;
+
+	memset(sample, 0, sizeof(*sample));
 
 	for (i = 0; i < 128; i++) {
 		sink += getpid();
@@ -180,11 +205,42 @@ static long scalar_workload(void)
 	else
 		return -1;
 
+	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &sample->ts);
+	if (rc < 0)
+		return -1;
+
+	rc = syscall(SYS_gettimeofday, &sample->tv, &sample->tz);
+	if (rc < 0)
+		return -1;
+
+	sample->time_ret = syscall(SYS_time, &sample->time_value);
+	if (sample->time_ret < 0 || sample->time_ret != sample->time_value)
+		return -1;
+
+	sink += sample->ts.tv_nsec & 0xff;
+	sink += sample->tv.tv_usec & 0xff;
+	sink += sample->time_value & 0xff;
+
 	return sink;
+}
+
+static int samples_match(const struct workload_sample *recorded,
+			 const struct workload_sample *replayed)
+{
+	return recorded->ts.tv_sec == replayed->ts.tv_sec &&
+	       recorded->ts.tv_nsec == replayed->ts.tv_nsec &&
+	       recorded->tv.tv_sec == replayed->tv.tv_sec &&
+	       recorded->tv.tv_usec == replayed->tv.tv_usec &&
+	       recorded->tz.tz_minuteswest == replayed->tz.tz_minuteswest &&
+	       recorded->tz.tz_dsttime == replayed->tz.tz_dsttime &&
+	       recorded->time_ret == replayed->time_ret &&
+	       recorded->time_value == replayed->time_value;
 }
 
 int main(void)
 {
+	struct workload_sample recorded_sample;
+	struct workload_sample replayed_sample;
 	long pid = getpid();
 	long entries;
 	long syscalls;
@@ -220,7 +276,7 @@ int main(void)
 		return 1;
 	}
 
-	sink = scalar_workload();
+	sink = deterministic_workload(&recorded_sample);
 
 	if (write_ctl_fd(ctl_fd, "stop\n") < 0) {
 		printf("KVM_RECORD_TASK: FAIL stop errno=%d\n", errno);
@@ -252,7 +308,7 @@ int main(void)
 	if (entries <= 0 || syscalls <= 0 || entries != syscalls ||
 	    same_task != syscalls ||
 	    other_tasks != 0 || first_pid != pid || last_pid != pid ||
-	    payload_entries < 2 || payload_bytes <= 390 || sink < 0) {
+	    payload_entries < 5 || payload_bytes <= 440 || sink < 0) {
 		printf("KVM_RECORD_TASK: FAIL pid=%ld entries=%ld syscalls=%ld ",
 		       pid, entries, syscalls);
 		printf("same=%ld other=%ld first=%ld last=%ld ",
@@ -276,7 +332,7 @@ int main(void)
 		return 1;
 	}
 
-	sink = scalar_workload();
+	sink = deterministic_workload(&replayed_sample);
 	if (close(ctl_fd) < 0) {
 		printf("KVM_RECORD_TASK: FAIL close replay ctl errno=%d\n", errno);
 		(void)write_ctl("destroy\n");
@@ -310,6 +366,18 @@ int main(void)
 		(void)write_ctl("destroy\n");
 		return 1;
 	}
+	if (!samples_match(&recorded_sample, &replayed_sample)) {
+		printf("KVM_RECORD_TASK: FAIL time payload mismatch ");
+		printf("recorded_clock=%ld.%09ld replayed_clock=%ld.%09ld ",
+		       (long)recorded_sample.ts.tv_sec,
+		       recorded_sample.ts.tv_nsec,
+		       (long)replayed_sample.ts.tv_sec,
+		       replayed_sample.ts.tv_nsec);
+		printf("recorded_time=%ld replayed_time=%ld\n",
+		       recorded_sample.time_value, replayed_sample.time_value);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
 
 	if (write_ctl("destroy\n") < 0) {
 		printf("KVM_RECORD_TASK: FAIL destroy errno=%d\n", errno);
@@ -320,6 +388,7 @@ int main(void)
 	       pid, entries, syscalls);
 	printf("same=%ld other=%ld payload_entries=%ld payload_bytes=%ld ",
 	       same_task, other_tasks, payload_entries, payload_bytes);
-	printf("replayed=%ld sink=%ld\n", replayed_entries, sink);
+	printf("replayed=%ld time=%ld sink=%ld\n", replayed_entries,
+	       replayed_sample.time_value, sink);
 	return 0;
 }

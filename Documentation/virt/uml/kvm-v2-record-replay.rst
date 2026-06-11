@@ -151,7 +151,8 @@ The smoke gate currently validates:
 * ``um_kvm_v2_record`` KUnit coverage for lifecycle, format, payload, strict
   policy, time-travel FIFO, buffer overflow, and snapshot cleanup behavior;
 * live debugfs recording with a snapshot-backed session;
-* task-owned replay of a bounded scalar plus ``uname(2)``/``getcwd(2)``
+* task-owned replay of a bounded scalar plus ``uname(2)``, ``getcwd(2)``,
+  ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` direct-syscall
   payload workload;
 * strict fail-closed behavior for a supported ``getcwd(2)`` argument mismatch;
 * raw ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` payload
