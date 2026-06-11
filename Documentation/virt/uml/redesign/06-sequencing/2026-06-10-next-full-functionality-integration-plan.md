@@ -125,9 +125,9 @@ The active blockers are now:
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
    through the record log. Strict raw-time policy, replayable
-   `clock_gettime(2)` payloads, RDTSC/RDTSCP trapping, and replay
+   `clock_gettime(2)`/`time(2)` payloads, RDTSC/RDTSCP trapping, and replay
    SIGALRM-mask blocking are now live-smoke validated, but raw-time coverage
-   beyond syscall `clock_gettime(2)`, replayable asynchronous signal ordering,
+   beyond syscall `clock_gettime(2)`/`time(2)`, replayable asynchronous signal ordering,
    device/network/hostfs event policy, and broader deterministic workload
    coverage are still open.
 6. Keep the clean KVM v2 state-trace diagnostics bounded and optional. The
@@ -688,8 +688,8 @@ Current `next` checkpoint:
   fail-closed policy, validation command, and non-goals.
 - Validation on 2026-06-11 after the live raw-time payload replay smoke:
   `kvm-record-smoke` PASS includes `live-time=1`, proving replay-mode
-  `clock_gettime(2)` returns the recorded timestamp bytes instead of observing
-  host time outside the log.
+  `clock_gettime(2)` and `time(2)` return recorded time bytes instead of
+  observing host time outside the log.
 - Validation on 2026-06-11 after the live RDTSC replay smoke:
   `kvm-record-smoke` PASS includes `live-rdtsc=1`, proving replay-mode direct
   user `RDTSC` faults instead of returning a host timestamp.
@@ -701,13 +701,13 @@ Current `next` checkpoint:
   `KVM_SET_SIGNAL_MASK` blocks `SIGALRM` during `KVM_RUN` and restores the
   normal mask afterward, as observed through
   `um_backend_kvm_v2_sigmask_install`.
-- Still open: raw-time coverage beyond syscall `clock_gettime(2)`,
+- Still open: raw-time coverage beyond syscall `clock_gettime(2)`/`time(2)`,
   replayable asynchronous signal-event ordering, broader deterministic
   workload coverage, and replayable device/network/hostfs event policy.
 
 Acceptance gates:
 
-- Record KUnit tests. Current status: PASS 22/22 for the experimental core.
+- Record KUnit tests. Current status: PASS 23/23 for the experimental core.
 - Record smoke test. Current status: PASS through `kvm-record-smoke`.
 - Replay smoke test. Current status: bounded PASS for the task-owned scalar
   plus `uname(2)`/`getcwd(2)` payload workload.
@@ -1537,7 +1537,7 @@ Kernel/unit gates:
 - Backend contract KUnit.
 - Snapshot KUnit. Current status: `um_kvm_v2_snapshot` PASS 4/4 on
   2026-06-10.
-- Record KUnit. Current status: `um_kvm_v2_record` PASS 22/22 on 2026-06-11.
+- Record KUnit. Current status: `um_kvm_v2_record` PASS 23/23 on 2026-06-11.
 
 Runtime smoke:
 

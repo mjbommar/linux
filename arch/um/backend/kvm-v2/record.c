@@ -64,6 +64,9 @@ bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
 #ifdef __NR_clock_gettime
 	case __NR_clock_gettime:
 #endif
+#ifdef __NR_time
+	case __NR_time:
+#endif
 	case __NR_getcwd:
 	case __NR_uname:
 		return true;
@@ -567,6 +570,10 @@ static bool kvm_v2_record_payload_args_match(const u64 args[6],
 #ifdef __NR_clock_gettime
 	case __NR_clock_gettime:
 		return args[0] == replay_args[0];
+#endif
+#ifdef __NR_time
+	case __NR_time:
+		return true;
 #endif
 	case __NR_uname:
 		return true;

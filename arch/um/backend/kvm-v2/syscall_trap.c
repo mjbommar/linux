@@ -1455,6 +1455,9 @@ static unsigned int kvm_v2_record_payload_arg(unsigned long syscall_nr)
 	case __NR_clock_gettime:
 		return 1;
 #endif
+#ifdef __NR_time
+	case __NR_time:
+#endif
 	case __NR_getcwd:
 	case __NR_uname:
 		return 0;
@@ -1493,6 +1496,12 @@ static size_t kvm_v2_record_payload_len(unsigned long syscall_nr, long ret)
 			return 0;
 		return sizeof(struct __kernel_timespec);
 #endif
+#ifdef __NR_time
+	case __NR_time:
+		if (ret < 0)
+			return 0;
+		return sizeof(__kernel_old_time_t);
+#endif
 	case __NR_getcwd:
 		if (ret <= 0 || ret > KVM_V2_RECORD_MAX_PAYLOAD)
 			return 0;
@@ -1513,6 +1522,10 @@ static size_t kvm_v2_record_payload_max_len(unsigned long syscall_nr,
 #ifdef __NR_clock_gettime
 	case __NR_clock_gettime:
 		return sizeof(struct __kernel_timespec);
+#endif
+#ifdef __NR_time
+	case __NR_time:
+		return sizeof(__kernel_old_time_t);
 #endif
 	case __NR_getcwd:
 		return min_t(size_t, regs->gp[HOST_SI],

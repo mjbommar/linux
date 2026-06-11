@@ -2,9 +2,9 @@
 /*
  * Guest-side raw-time payload smoke for strict KVM v2 replay.
  *
- * The helper records one clock_gettime(2) result, arms replay, and verifies
- * that replay returns the recorded timestamp bytes instead of consulting host
- * time again.
+ * The helper records clock_gettime(2) and time(2) results, arms replay, and
+ * verifies that replay returns the recorded time bytes instead of consulting
+ * host time again.
  */
 
 #define _GNU_SOURCE
@@ -23,6 +23,9 @@
 
 #ifndef SYS_clock_gettime
 #define SYS_clock_gettime	228
+#endif
+#ifndef SYS_time
+#define SYS_time		201
 #endif
 
 static int ensure_dir(const char *path)
@@ -75,6 +78,10 @@ int main(void)
 {
 	struct timespec recorded;
 	struct timespec replayed;
+	long recorded_time = 0;
+	long replayed_time = 0;
+	long recorded_time_ret;
+	long replayed_time_ret;
 	long rc;
 	int fd;
 
@@ -96,6 +103,22 @@ int main(void)
 	if (rc < 0) {
 		printf("KVM_RECORD_TIME: FAIL record clock_gettime rc=%ld errno=%d\n",
 		       rc, errno);
+		(void)close(fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	recorded_time_ret = syscall(SYS_time, &recorded_time);
+	if (recorded_time_ret < 0) {
+		printf("KVM_RECORD_TIME: FAIL record time rc=%ld errno=%d\n",
+		       recorded_time_ret, errno);
+		(void)close(fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+	if (recorded_time_ret != recorded_time) {
+		printf("KVM_RECORD_TIME: FAIL record time ret=%ld stored=%ld\n",
+		       recorded_time_ret, recorded_time);
 		(void)close(fd);
 		(void)write_ctl("destroy\n");
 		return 1;
@@ -137,6 +160,15 @@ int main(void)
 		(void)write_ctl("destroy\n");
 		return 1;
 	}
+
+	replayed_time_ret = syscall(SYS_time, &replayed_time);
+	if (replayed_time_ret < 0) {
+		printf("KVM_RECORD_TIME: FAIL replay time rc=%ld errno=%d\n",
+		       replayed_time_ret, errno);
+		(void)close(fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
 	if (close(fd) < 0) {
 		printf("KVM_RECORD_TIME: FAIL close replay ctl errno=%d\n",
 		       errno);
@@ -153,13 +185,23 @@ int main(void)
 		return 1;
 	}
 
+	if (recorded_time_ret != replayed_time_ret ||
+	    recorded_time != replayed_time) {
+		printf("KVM_RECORD_TIME: FAIL time mismatch ");
+		printf("recorded_ret=%ld recorded=%ld ",
+		       recorded_time_ret, recorded_time);
+		printf("replayed_ret=%ld replayed=%ld\n",
+		       replayed_time_ret, replayed_time);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
 	if (write_ctl("destroy\n") < 0) {
 		printf("KVM_RECORD_TIME: FAIL destroy errno=%d\n", errno);
 		return 1;
 	}
 
-	printf("KVM_RECORD_TIME: PASS syscall=%ld name=clock_gettime sec=%ld nsec=%ld\n",
-	       (long)SYS_clock_gettime, (long)replayed.tv_sec,
-	       replayed.tv_nsec);
+	printf("KVM_RECORD_TIME: PASS clock_gettime=%ld.%09ld time=%ld\n",
+	       (long)replayed.tv_sec, replayed.tv_nsec, replayed_time);
 	return 0;
 }

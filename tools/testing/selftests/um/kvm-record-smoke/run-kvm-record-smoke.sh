@@ -114,6 +114,7 @@ CASES=(
 	"test_record_syscall_payload_fifo"
 	"test_record_syscall_payload_getcwd_fifo"
 	"test_record_syscall_payload_clock_gettime_fifo"
+	"test_record_syscall_payload_time_fifo"
 	"test_record_syscall_payload_short_buffer"
 	"test_record_syscall_payload_arg_mismatch"
 	"test_record_syscall_payload_overflow"
