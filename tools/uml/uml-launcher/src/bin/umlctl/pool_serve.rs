@@ -443,12 +443,8 @@ impl DaemonState {
         resume_member(pid).with_context(|| format!("resume pool member pid {}", pid))?;
 
         let cmd_str = build_mconsole_exec_command(argv, env, cwd, timeout_secs);
-        let ready_timeout = Duration::from_secs(10);
-        let mconsole_timeout = if timeout_secs > 0 {
-            Duration::from_secs(timeout_secs).saturating_add(Duration::from_secs(3))
-        } else {
-            Duration::from_secs(10)
-        };
+        let ready_timeout = mconsole_ready_timeout(timeout_secs);
+        let mconsole_timeout = mconsole_command_timeout(timeout_secs);
         wait_for_mconsole_ready(&member.mconsole_path, ready_timeout)
             .with_context(|| format!("wait for member mconsole {}", member.mconsole_path))?;
 
@@ -598,6 +594,18 @@ fn wait_for_mconsole_ready(path: &str, deadline: Duration) -> Result<()> {
         Err(e).context("mconsole version probe did not complete before deadline")
     } else {
         bail!("mconsole version probe did not complete before deadline")
+    }
+}
+
+fn mconsole_ready_timeout(timeout_secs: u64) -> Duration {
+    mconsole_command_timeout(timeout_secs).max(Duration::from_secs(10))
+}
+
+fn mconsole_command_timeout(timeout_secs: u64) -> Duration {
+    if timeout_secs > 0 {
+        Duration::from_secs(timeout_secs).saturating_add(Duration::from_secs(3))
+    } else {
+        Duration::from_secs(10)
     }
 }
 
@@ -1287,6 +1295,19 @@ mod tests {
             build_mconsole_exec_command(&argv, &env, "", 3),
             "exec timeout=3 -- /bin/sleep 5"
         );
+    }
+
+    #[test]
+    fn mconsole_timeouts_default_to_ten_seconds() {
+        assert_eq!(mconsole_command_timeout(0), Duration::from_secs(10));
+        assert_eq!(mconsole_ready_timeout(0), Duration::from_secs(10));
+        assert_eq!(mconsole_ready_timeout(1), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn mconsole_ready_timeout_tracks_long_exec_timeout() {
+        assert_eq!(mconsole_command_timeout(20), Duration::from_secs(23));
+        assert_eq!(mconsole_ready_timeout(20), Duration::from_secs(23));
     }
 
     #[test]

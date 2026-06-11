@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, current-HEAD syzkaller shim rerun, active selftest wording cleanup, clean KVM v2 state-trace diagnostics, pool exec mconsole readiness timeout alignment, and refreshed vector2 current-head validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -332,9 +332,9 @@ Current bounded vector2 evidence adds:
   single queue, and both logs reached `SERVER_READY`,
   `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. This is a
   path smoke, not the full KVM-v2 Tier 3 publication gate.
-- Current-head `um_vector2_*` KUnit passes on rebuilt `98166580dc4f`: 84 pass,
-  0 fail, 2 trusted-TAP skips across config, queue, transport, fake-host,
-  model, cmdline, netdev, ethtool, host-fd, and host-tap suites.
+- Current-head `um_vector2_*` KUnit passes on the rebuilt current branch:
+  96 pass, 0 fail, 2 trusted-TAP skips across config, queue, transport,
+  fake-host, model, cmdline, netdev, ethtool, host-fd, and host-tap suites.
 - A focused `vector2-fd-multiqueue-smoke` now validates launcher-owned fd
   multiqueue handoff: `umlctl up` creates a multiqueue TAP, opens four TAP
   fds, inherits fd range 200..203, the guest reports `UMLCTL_NETWORK_QUEUES=4`
@@ -543,6 +543,14 @@ Current bounded vector2 evidence adds:
   drove a second `ndo_open()` failure, observed `open_delta=1`,
   `fail_delta=1`, `close_delta=1`, and left `vec2.0` closed/registered with
   the host TAP cleaned up.
+- The latest current-branch vector2/launcher rerun used a rebuilt debug
+  `umlctl` with the daemon `exec` mconsole readiness timeout aligned to the
+  caller timeout. `cargo fmt --check`, `cargo test --locked`, and
+  `cargo build --locked --bin umlctl` pass; the locked launcher suite now
+  reports 215 tests. Focused fd handoff, fd multiqueue, in-process TAP,
+  sandbox audit, failed-open, pool TAP, and `pool-exec-smoke` all pass. The
+  guest-to-host TCP `net-bench` gate passes with legacy vector median
+  41865.7 Mbps, vector2 median 40118.6 Mbps, and ratio 0.958.
 
 Current vector2 validation gates are tracked in
 `08-future-phases/49-uml-vector-driver-v2-validation-gates-2026-05-17.md`;
@@ -649,7 +657,9 @@ Current boundary:
   current public ABI, while the bounded shell-backed mconsole lowering and guest
   `timeout(1)` helper dependency are documented implementation details. A
   stricter kernel argv/env/cwd transport is future `exec/2` work, not a blocker
-  for the current completion claim;
+  for the current completion claim. The mconsole readiness wait now follows the
+  requested exec timeout, with a 10-second floor, instead of using a fixed
+  10-second probe budget;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
@@ -687,7 +697,8 @@ Current boundary:
   assigns a different per-member TAP/MAC/IPv4/mconsole identity, daemon-routed
   `exec` observes the assigned `vec2.0` address, brings the link up, and
   reaches the host-side TAP with a one-packet ping. This was rerun against
-  `bb092119158b` after the vector2 TX write-IRQ suppression change.
+  the current rebuilt `umlctl` after the vector2 TX write-IRQ suppression
+  change and the daemon `exec` mconsole readiness timeout alignment.
 - A focused privileged `perf stat` smoke now validates that syscall-rate and
   CPU-counter collection is available on this host with `sudo -n perf stat`
   despite unprivileged `perf_event_paranoid=4`.  One 64 KiB TCP
@@ -735,7 +746,7 @@ developer-facing paths:
 - `cargo fmt --check`, `cargo test`, and
   `make -C tools/uml/uml-launcher check` pass in
   `tools/uml/uml-launcher`; the latest `cargo test --locked` rerun passed
-  213 tests across `uml-launcher`, `umlctl`, and policy/profile tests;
+  215 tests across `uml-launcher`, `umlctl`, and policy/profile tests;
 - `cargo build --bins` and `cargo build --release --bins` produce current
   debug and release `umlctl` binaries;
 - an isolated current-branch lifecycle smoke against `./linux` passes through
