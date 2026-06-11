@@ -367,6 +367,15 @@ Current bounded vector2 evidence adds:
   received-packet count.  This reduces interrupt/poll churn but does not close
   the throughput gate: the rerun's host-side medians were legacy vector
   1.6215 MiB/s and vector2 0.8850 MiB/s, ratio 0.5458.
+- Vector2 fd and in-process TAP RX now share a vnet-header fast path that
+  matches legacy vector's `VIRTIO_NET_HDR_F_DATA_VALID` handling by marking
+  the skb checksum unnecessary without running the full virtio header
+  conversion.  Validation reports a clean UML rebuild and `um_vector2_*`
+  KUnit 92 pass with 2 trusted-TAP skips, including a TAP RX DATA_VALID
+  checksum test.  A focused 1 MiB host-to-guest rerun improved vector2's
+  host-side median from 0.8850 MiB/s to 0.9990 MiB/s in the local sample, but
+  the no-regression gate remains open: legacy vector's median was
+  1.6090 MiB/s, for a vector2/legacy ratio of 0.6209.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now

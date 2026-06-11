@@ -87,7 +87,7 @@ static int um_vec2_fd_parse_vnet_skb(struct sk_buff *skb, int len)
 	skb_trim(skb, len);
 	memcpy(&hdr, skb->data, sizeof(hdr));
 	skb_pull(skb, sizeof(hdr));
-	if (virtio_net_hdr_to_skb(skb, &hdr, true))
+	if (um_vec2_apply_vnet_hdr(skb, &hdr))
 		return -EPROTO;
 
 	return skb->len;

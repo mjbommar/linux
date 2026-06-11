@@ -15,6 +15,7 @@
 #include <linux/spinlock.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
+#include <linux/virtio_net.h>
 
 #include "vector2_config.h"
 #include "vector2_host.h"
@@ -126,6 +127,17 @@ static inline u64 um_vec2_stat_read(const struct um_vec2_dev *vdev,
 				    enum um_vec2_stat_counter counter)
 {
 	return atomic64_read(&vdev->stats.counter[counter]);
+}
+
+static inline int um_vec2_apply_vnet_hdr(struct sk_buff *skb,
+					 const struct virtio_net_hdr *hdr)
+{
+	if (hdr->flags & VIRTIO_NET_HDR_F_DATA_VALID) {
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+		return 0;
+	}
+
+	return virtio_net_hdr_to_skb(skb, hdr, true) ? -EPROTO : 0;
 }
 
 int um_vec2_cmdline_parse_spec(const char *arg,

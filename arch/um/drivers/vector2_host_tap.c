@@ -164,7 +164,7 @@ static int um_vec2_tap_read_skb(struct um_vec2_tap_host *taphost,
 	memcpy(&hdr, skb->data, sizeof(hdr));
 	skb_pull(skb, sizeof(hdr));
 
-	ret = virtio_net_hdr_to_skb(skb, &hdr, true);
+	ret = um_vec2_apply_vnet_hdr(skb, &hdr);
 	if (ret)
 		return -EPROTO;
 

@@ -147,6 +147,8 @@ struct vector2_tap_rx_trace {
 	unsigned int packets;
 	unsigned int bytes;
 	u8 first_payload_byte;
+	bool check_ip_summed;
+	u8 expected_ip_summed;
 };
 
 static void vector2_tap_rx_consume(void *owner, unsigned int len, void *cookie)
@@ -159,6 +161,9 @@ static void vector2_tap_rx_consume(void *owner, unsigned int len, void *cookie)
 	KUNIT_EXPECT_EQ(trace->test, skb->len, len);
 	KUNIT_EXPECT_EQ(trace->test, skb->data[ETH_HLEN],
 			trace->first_payload_byte);
+	if (trace->check_ip_summed)
+		KUNIT_EXPECT_EQ(trace->test, (u8)skb->ip_summed,
+				trace->expected_ip_summed);
 	dev_kfree_skb_any(skb);
 }
 
@@ -359,6 +364,55 @@ static void vector2_tap_rx_batch_reads_frame_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_tap_rx_data_valid_sets_checksum_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_tap_test_alloc_vdev(test, 17);
+	struct net_device *dev = vector2_tap_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channel;
+	struct vector2_tap_rx_trace trace = {
+		.test = test,
+		.first_payload_byte = 0x45,
+		.check_ip_summed = true,
+		.expected_ip_summed = CHECKSUM_UNNECESSARY,
+	};
+	unsigned char frame[sizeof(struct virtio_net_hdr) + ETH_HLEN + 8] = {
+	};
+	struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)frame;
+	int fds[2] = { -1, -1 };
+	int ret;
+
+	hdr->flags = VIRTIO_NET_HDR_F_DATA_VALID;
+	memset(frame + sizeof(struct virtio_net_hdr), 0xff, ETH_ALEN);
+	frame[sizeof(struct virtio_net_hdr) + ETH_ALEN] = 0x02;
+	frame[sizeof(struct virtio_net_hdr) + 2 * ETH_ALEN] = 0x08;
+	frame[sizeof(struct virtio_net_hdr) + 2 * ETH_ALEN + 1] = 0x00;
+	frame[sizeof(struct virtio_net_hdr) + ETH_HLEN] = 0x45;
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_tap_attach_fd(vdev, fds[0]), 0);
+	fds[0] = -1;
+	channel = &vdev->channels[0];
+
+	KUNIT_ASSERT_EQ(test, os_write_file(fds[1], frame, sizeof(frame)),
+			(int)sizeof(frame));
+
+	ret = channel->host->ops->rx_batch(channel->host, &channel->queue->rx,
+					   4, vector2_tap_rx_alloc,
+					   vector2_tap_rx_release, dev);
+	KUNIT_EXPECT_EQ(test, ret, 1);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_rx_batch_consume(&channel->queue->rx, 1,
+						 vector2_tap_rx_consume,
+						 &trace), 0);
+	KUNIT_EXPECT_EQ(test, trace.packets, 1U);
+	KUNIT_EXPECT_EQ(test, trace.bytes, (unsigned int)(ETH_HLEN + 8));
+
+	um_vec2_tap_close(vdev);
+	vector2_tap_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 /*
  * Short frames must propagate -EPROTO from rx_batch.
  *
@@ -439,6 +493,7 @@ static struct kunit_case vector2_tap_test_cases[] = {
 	KUNIT_CASE(vector2_tap_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_tap_tx_batch_preserves_frags_test),
 	KUNIT_CASE(vector2_tap_rx_batch_reads_frame_test),
+	KUNIT_CASE(vector2_tap_rx_data_valid_sets_checksum_test),
 	KUNIT_CASE(vector2_tap_rx_batch_short_frame_returns_eproto_test),
 	KUNIT_CASE(vector2_tap_sandbox_open_fails_closed_test),
 	KUNIT_CASE(vector2_tap_netdev_open_unwinds_sandbox_test),
