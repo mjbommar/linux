@@ -4,26 +4,42 @@ Date: 2026-06-11
 
 Branch target: `next`
 
-Current committed baseline at plan write:
+Current committed baseline at latest refresh:
 
-- `next`: `d562ad95451a`
-- `origin/next`: `d562ad95451a`
+- `next`: `f9abd17de711`
+- `origin/next`: `f9abd17de711`
 - `torvalds/master`: `9716c086c8e8`
-- `torvalds/master...next`: `0` commits behind, `116` commits ahead
+- `torvalds/master...next`: `0` commits behind, `125` commits ahead
 - upstream ancestry: `torvalds/master` is an ancestor of `next`
 - worktree state: clean at this plan refresh (`## next...origin/next`)
 
 Current execution evidence added on 2026-06-11:
 
+- refreshed this plan after the branch reached `f9abd17de711`;
+- cleaned KVM v2 state comments and x86 UML ptrace TLS register handling in
+  active source;
+- tightened the substrate gate and recorded CPython tier-0 evidence through
+  `umlctl gate run` for both seccomp and KVM v2;
+- documented KGDB as deferred-not-present rather than a current UML v2
+  instrumentation feature;
 - rebuilt `./linux` from `next` at `59ad334001ea`;
 - rebuilt kernel version: `7.1.0-rc7-00187-g59ad334001ea`;
 - focused pool/fork/syzkaller regression pass recorded in
   `2026-06-11-pool-fork-regression-pass.md`;
 - the pass covers template pause, fork smoke/stress, pool-member, replicated
   sustained pool, pivot, pool spawn/serve/exec/port-forward/mconsole, full
-  pool benchmark, and syzkaller shim; and
-- this is current-HEAD evidence, not a substitute for the final post-KVM/vector2
-  validation matrix.
+  pool benchmark, and syzkaller shim;
+- rebuilt and validated vector2 on `98166580dc4f`, with `um_vector2_*` KUnit
+  reporting 84 pass, 0 fail, and 2 trusted-TAP skips, plus focused fd,
+  multiqueue, in-process TAP, sandbox, and pool TAP smokes;
+- recorded a bounded KVM-v2/vector2 Tier 3 path smoke for one Django-v2 and
+  one FastAPI-v2 iteration; and
+- the pool/fork, CPython, and vector2 evidence is current focused evidence,
+  not a substitute for the final post-KMSAN/record-replay/vector2 validation
+  matrix.
+
+This file is now the plan of record for completing, importing, or explicitly
+retiring all original UML v2 functionality on `next`.
 
 This is the operating plan for turning `next` into the single complete UML v2
 branch. It complements the feature inventory in
@@ -53,6 +69,11 @@ selftests, tools, and user-facing docs should not contain internal issue
 numbers, phase diaries, branch archaeology, investigation logs, or stale claims.
 Historical context can remain in redesign archives when it is useful, but it
 must not leak into upstream-facing code or current user documentation.
+
+The plan is intentionally conservative: do not reimplement already-sound code
+for aesthetic reasons, and do not direct-merge historical branches. Mine old
+branches for missing behavior and tests, then port or reimplement only the
+pieces that still belong in the final `next` branch.
 
 ## Completion Standard
 
@@ -100,6 +121,33 @@ Treat these as input, not automatically-current truth:
 
 The conflict rule is simple: current implementation and fresh validation on
 `next` override old plans, reports, presentations, and branch notes.
+
+## All-Functionality Closure Model
+
+Every original or historical feature must move through this closure model
+before the final completion claim:
+
+1. **Inventory.** Name the feature, the live `next` surface, the historical
+   branch or document where it came from, and the current status label in
+   `2026-06-10-next-functionality-inventory.md`.
+2. **Disposition.** Choose exactly one outcome: keep as already complete, clean
+   in place, import from history, reimplement against current architecture,
+   retire with rationale, or keep experimental and excluded from the completion
+   claim.
+3. **Implementation.** Make the smallest coherent code change on `next`; avoid
+   importing diary comments, local issue numbers, stale phase labels, or branch
+   archaeology.
+4. **Validation.** Run the smallest meaningful focused gate for that feature
+   and record the exact command shape, commit, result, and remaining limits.
+5. **Documentation.** Update the live inventory, this execution plan if the
+   blocker state changed, `STATUS.md` for user-visible readiness changes, and
+   active user docs for any CLI/Kconfig/debugfs/mconsole behavior changes.
+6. **Commit and push.** Commit one coherent slice with a `Signed-off-by` trailer
+   and push `next` before starting the next unrelated slice.
+
+The closure model prevents two common failure modes: claiming completion while
+a feature still exists only on an old branch, and weakening the branch by
+copying old research-code history into active upstream-facing files.
 
 ## Review Surface And Cleanup Calibration
 
@@ -236,6 +284,8 @@ Acceptance:
 - `git rev-list --left-right --count torvalds/master...next`
 - `git merge-base --is-ancestor torvalds/master next`
 - Clean or intentionally scoped worktree before staging.
+- `git push` confirms `next` and `origin/next` match after each completed
+  slice.
 
 ### 1. Current Correctness And User-Surface Mismatches
 
@@ -551,12 +601,34 @@ documentation in place.
 
 ## Immediate Next Actions
 
-1. Start from a clean, pushed `next` baseline or explicitly isolate any local
-   experimental changes from the next commit.
-2. Close the KMSAN/profile runtime question or document its exact blocker.
-3. Decide the record/replay completion tier.
-4. Run the final pool/syzkaller smoke set after any KVM/vector2 changes.
-5. Finish vector2 KVM v2 Tier 3 and multiqueue/fairness validation.
-6. Complete the active-source and selftest cleanup scan.
-7. Update `STATUS.md` and the live inventory after each closed work package.
-8. Push each validated slice to `origin/next`.
+Execute the remaining work in this order unless a blocker forces a narrower
+detour:
+
+1. Start every slice from clean, pushed `next` at `origin/next`, and record the
+   `torvalds/master...next` count before making claims about upstream currency.
+2. Reproduce the current KMSAN runtime smoke failure on the latest `next` with
+   a clean LLVM `uml/research-kmsan` build, then either land a narrow
+   UML-local runtime fix or strengthen the blocker note with current-commit
+   evidence and a precise next investigation target.
+3. Decide the record/replay completion tier in writing. If it remains part of
+   the original completion claim, implement the missing determinism policy and
+   workload gate. If it stays experimental, record the exclusion and remove any
+   active user-facing language that implies supported deterministic replay.
+4. Finish vector2 publication evidence: natural 7200-second seccomp Tier 3,
+   full KVM-v2 Tier 3 networking coverage, and multiqueue fairness/performance.
+   Keep v2 opt-in until those gates justify stronger language.
+5. Re-run the pool, fork-server, daemon exec, and syzkaller smoke set on the
+   final KVM/vector2 stack. Keep `exec/1` as the supported ABI unless a separate
+   `exec/2` kernel argv transport is deliberately implemented and tested.
+6. Complete profile and instrumentation closure: all kernel profile builds,
+   runtime profile probes, focused sanitizer/instrumentation smokes, KMSAN
+   disposition, and KGDB exclusion or implementation.
+7. Run the active-source cleanup scans over `arch/um`, UML selftests,
+   `uml-launcher`, non-redesign UML docs, live status docs, and current
+   sequencing/future-phase trackers. Rewrite active comments into normal kernel
+   style and move useful history to clearly archival docs.
+8. Regenerate upstream patch-series planning from the final branch shape,
+   after implementation and cleanup stabilize.
+9. Run the final integration gate, update `STATUS.md`, update the inventory,
+   write the final completion note with pass/fail/skip and deferred/retired
+   items, commit, push, and verify `next == origin/next`.
