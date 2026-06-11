@@ -402,13 +402,51 @@ the 1 MiB transfer, `napi_polls: 1257`, `rx_irqs: 500`,
 `rx_batch_prepared_total: 31936`, and `rx_batch_received_total: 909` with no
 RX or TX error counters.
 
+The next RX-side cleanup changed fd and TAP receive batching to prepare one
+RX slot per nonblocking read attempt instead of preparing the full NAPI budget
+up front.  This removes the diagnostic over-preparation without closing the
+small-transfer throughput gap.  A focused before/after comparison used
+host-to-guest 1 MiB transfers:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g-1m-lazyrx
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g-1m-lazyrx \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=3 \
+UML_VECTOR_PERF_PORT=19099 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Focused lazy-RX best observed host-side throughput:
+
+```text
+driver   host_mib_s best
+vector   1.601
+vector2  0.951
+ratio    0.594
+```
+
+The useful result is in the counters, not the throughput.  Before lazy RX, a
+representative vector2 1 MiB host-to-guest run recorded
+`rx_batch_prepared_total: 32448`, `rx_batch_received_total: 906`, and
+`rx_batch_released_total: 31542`.  After lazy RX, comparable runs recorded
+about `rx_batch_prepared_total: 1408..1416`,
+`rx_batch_received_total: 903..907`, and `rx_batch_released_total: 505..509`,
+with no RX/TX error counters.  The normal guest-to-host TCP gate still passes
+after the change: legacy vector median 39215.2 Mbps, vector2 median
+38960.1 Mbps, ratio 0.993 against the 0.85 bar.
+
 Interpretation:
 
 - current guest-to-host fixed-byte TCP now clears the 0.85 bar across all
   three measured sizes;
 - host-to-guest clears the larger 8 MiB and 32 MiB cells in this harness;
 - host-to-guest 1 MiB remains a reproducible small-transfer regression in the
-  fixed-byte harness, and single-queue vector2 improves but does not close it;
+  fixed-byte harness; single-queue vector2 and lazy RX both improve the cell
+  but do not close it;
   and
 - this refresh improves the TCP story, but it does not close P4.3 because UDP,
   syscall-rate, CPU-utilisation, and the host-to-guest small-transfer issue

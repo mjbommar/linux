@@ -92,13 +92,14 @@ static int um_vec2_tap_rx_batch(struct um_vec2_host *host,
 	if (budget > UM_VEC2_TAP_MAX_BATCH)
 		budget = UM_VEC2_TAP_MAX_BATCH;
 
-	ret = um_vec2_rx_batch_prepare(batch, budget, alloc, release, cookie);
-	if (ret)
-		return ret;
-
 	for (i = 0; i < budget; i++) {
-		struct sk_buff *skb = batch->slot[i].owner;
+		struct sk_buff *skb;
 
+		ret = um_vec2_rx_batch_prepare_next(batch, alloc, cookie);
+		if (ret)
+			break;
+
+		skb = batch->slot[i].owner;
 		ret = um_vec2_tap_read_skb(taphost, skb);
 		if (!ret || ret == -EAGAIN)
 			break;
@@ -412,6 +413,10 @@ int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
 		return -ENODEV;
 	if (vdev->channels)
 		return -EBUSY;
+
+	ret = os_set_fd_block(fd, 0);
+	if (ret)
+		return ret;
 
 	channel = kzalloc_obj(*channel);
 	if (!channel)

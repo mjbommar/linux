@@ -221,6 +221,42 @@ static void vector2_queue_rx_alloc_failure_unwinds_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, batch.released_total, 2ULL);
 }
 
+static void vector2_queue_rx_prepare_next_test(struct kunit *test)
+{
+	struct vector2_queue_trace release_trace = {};
+	struct vector2_rx_alloc_ctx alloc = {
+		.fail_at = 2,
+		.fail_enabled = true,
+	};
+	struct um_vec2_rx_slot slots[4];
+	struct um_vec2_rx_batch batch;
+	unsigned int lens[] = { 64 };
+
+	KUNIT_ASSERT_EQ(test, um_vec2_rx_batch_init(&batch, slots, 4), 0);
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_prepare_next(&batch,
+							    vector2_rx_alloc,
+							    &alloc), 0);
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_prepare_next(&batch,
+							    vector2_rx_alloc,
+							    &alloc), 0);
+	KUNIT_EXPECT_EQ(test, batch.prepared, 2U);
+	KUNIT_EXPECT_EQ(test, batch.prepared_total, 2ULL);
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_prepare_next(&batch,
+							    vector2_rx_alloc,
+							    &alloc), -ENOMEM);
+	KUNIT_EXPECT_EQ(test, batch.prepared, 2U);
+
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_complete(&batch, 1, lens,
+							vector2_queue_trace_release,
+							&release_trace), 0);
+	KUNIT_EXPECT_EQ(test, release_trace.count, 1U);
+	KUNIT_EXPECT_EQ(test, release_trace.owner[0], 2UL);
+	KUNIT_EXPECT_EQ(test, batch.filled, 1U);
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_prepare_next(&batch,
+							    vector2_rx_alloc,
+							    NULL), -EBUSY);
+}
+
 static void vector2_queue_rx_rejects_busy_and_invalid_test(struct kunit *test)
 {
 	struct vector2_queue_trace trace = {};
@@ -270,6 +306,7 @@ static struct kunit_case vector2_queue_test_cases[] = {
 	KUNIT_CASE(vector2_queue_tx_reset_releases_test),
 	KUNIT_CASE(vector2_queue_rx_prepare_receive_consume_test),
 	KUNIT_CASE(vector2_queue_rx_alloc_failure_unwinds_test),
+	KUNIT_CASE(vector2_queue_rx_prepare_next_test),
 	KUNIT_CASE(vector2_queue_rx_rejects_busy_and_invalid_test),
 	KUNIT_CASE(vector2_queue_rx_reset_releases_filled_test),
 	{}

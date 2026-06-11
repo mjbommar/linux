@@ -142,13 +142,14 @@ static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
 	if (budget > ARRAY_SIZE(lens))
 		budget = ARRAY_SIZE(lens);
 
-	ret = um_vec2_rx_batch_prepare(batch, budget, alloc, release, cookie);
-	if (ret)
-		return ret;
-
 	for (i = 0; i < budget; i++) {
-		struct sk_buff *skb = batch->slot[i].owner;
+		struct sk_buff *skb;
 
+		ret = um_vec2_rx_batch_prepare_next(batch, alloc, cookie);
+		if (ret)
+			break;
+
+		skb = batch->slot[i].owner;
 		ret = um_vec2_fd_read_skb(fdhost, skb);
 		if (ret == -EAGAIN)
 			break;

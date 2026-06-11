@@ -91,6 +91,8 @@ um_vec2_rx_batch_slot(const struct um_vec2_rx_batch *batch,
 int um_vec2_rx_batch_prepare(struct um_vec2_rx_batch *batch,
 			     unsigned int budget, um_vec2_rx_alloc_fn alloc,
 			     um_vec2_queue_release_fn release, void *cookie);
+int um_vec2_rx_batch_prepare_next(struct um_vec2_rx_batch *batch,
+				  um_vec2_rx_alloc_fn alloc, void *cookie);
 int um_vec2_rx_batch_complete(struct um_vec2_rx_batch *batch,
 			      unsigned int received, const unsigned int *lens,
 			      um_vec2_queue_release_fn release, void *cookie);

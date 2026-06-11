@@ -194,6 +194,7 @@ int um_vec2_rx_batch_prepare(struct um_vec2_rx_batch *batch,
 			     um_vec2_queue_release_fn release, void *cookie)
 {
 	unsigned int i;
+	int ret;
 
 	if (!alloc || budget > batch->depth)
 		return -EINVAL;
@@ -201,19 +202,42 @@ int um_vec2_rx_batch_prepare(struct um_vec2_rx_batch *batch,
 		return -EBUSY;
 
 	for (i = 0; i < budget; i++) {
-		void *owner = alloc(i, cookie);
-
-		if (!owner) {
+		ret = um_vec2_rx_batch_prepare_next(batch, alloc, cookie);
+		if (ret) {
 			um_vec2_rx_batch_reset(batch, release, cookie);
-			return -ENOMEM;
+			return ret;
 		}
-
-		batch->slot[i].owner = owner;
-		batch->slot[i].len = 0;
-		batch->slot[i].state = UM_VEC2_RX_SLOT_PREPARED;
-		batch->prepared++;
-		batch->prepared_total++;
 	}
+
+	return 0;
+}
+
+int um_vec2_rx_batch_prepare_next(struct um_vec2_rx_batch *batch,
+				  um_vec2_rx_alloc_fn alloc, void *cookie)
+{
+	struct um_vec2_rx_slot *slot;
+	void *owner;
+
+	if (!alloc)
+		return -EINVAL;
+	if (batch->filled)
+		return -EBUSY;
+	if (batch->prepared >= batch->depth)
+		return -ENOSPC;
+
+	slot = &batch->slot[batch->prepared];
+	if (slot->state != UM_VEC2_RX_SLOT_FREE)
+		return -EIO;
+
+	owner = alloc(batch->prepared, cookie);
+	if (!owner)
+		return -ENOMEM;
+
+	slot->owner = owner;
+	slot->len = 0;
+	slot->state = UM_VEC2_RX_SLOT_PREPARED;
+	batch->prepared++;
+	batch->prepared_total++;
 
 	return 0;
 }

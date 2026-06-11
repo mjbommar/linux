@@ -654,10 +654,12 @@ static void vector2_fd_rx_batch_reads_frame_test(struct kunit *test)
 			(int)sizeof(frame));
 
 	ret = channel->host->ops->rx_batch(channel->host, &channel->queue->rx,
-					   1, vector2_fd_rx_alloc,
+					   4, vector2_fd_rx_alloc,
 					   vector2_fd_rx_release, dev);
 	KUNIT_EXPECT_EQ(test, ret, 1);
 	KUNIT_EXPECT_EQ(test, channel->queue->rx.filled, 1U);
+	KUNIT_EXPECT_EQ(test, channel->queue->rx.prepared_total, 2ULL);
+	KUNIT_EXPECT_EQ(test, channel->queue->rx.released_total, 1ULL);
 	KUNIT_EXPECT_EQ(test,
 			um_vec2_rx_batch_consume(&channel->queue->rx, 1,
 						 vector2_fd_rx_consume,
