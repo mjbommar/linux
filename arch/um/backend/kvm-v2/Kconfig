@@ -76,11 +76,12 @@ config UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
 	  a bounded in-memory event stream, strict replay checking, and KUnit
 	  coverage for the state machine and FIFO replay rules.
 
-	  The live KVM syscall dispatcher can observe and consume this log, but
-	  this does not yet expose a supported user ABI or wire full
-	  deterministic runtime replay into snapshot, time, signal, or device
-	  paths. Keep this off for normal builds while the remaining
-	  record/replay integration is completed.
+	  The live KVM syscall dispatcher can observe and consume this log, and
+	  the debugfs validation surface can capture a KVM v2 task snapshot at
+	  record start and restore it before replay. This does not yet expose a
+	  supported user ABI or wire full deterministic runtime replay into
+	  time, signal, or device paths. Keep this off for normal builds while
+	  the remaining record/replay integration is completed.
 
 config UM_BACKEND_KVM_V2_RECORD_REPLAY_KUNIT
 	tristate

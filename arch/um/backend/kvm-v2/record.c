@@ -4,8 +4,9 @@
  *
  * This file owns the in-memory record container and the bounded syscall log
  * used by the experimental replay path. The live KVM syscall dispatcher
- * observes and consumes syscall entries from this core; snapshot, time, signal,
- * and device determinism remain outside the current supported surface.
+ * observes and consumes syscall entries from this core; snapshot-backed record
+ * start is present, but time, signal, and device determinism remain outside the
+ * current supported surface.
  */
 
 #include <linux/errno.h>
@@ -97,6 +98,15 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->syscall_count = 0;
 }
 
+static void kvm_v2_record_release_snapshot_locked(struct kvm_v2_record *rec)
+{
+	kvm_v2_snapshot_destroy(rec->snapshot);
+	rec->snapshot = NULL;
+	rec->snapshot_attempted = false;
+	rec->snapshot_valid = false;
+	rec->snapshot_rc = 0;
+}
+
 int kvm_v2_record_reset(struct kvm_v2_record *rec)
 {
 	int rc = 0;
@@ -112,6 +122,7 @@ int kvm_v2_record_reset(struct kvm_v2_record *rec)
 	}
 
 	kvm_v2_record_reset_counters(rec);
+	kvm_v2_record_release_snapshot_locked(rec);
 	rec->state = KVM_V2_RECORD_INIT;
 	rec->strict_replay = true;
 
@@ -174,6 +185,9 @@ void kvm_v2_record_destroy(struct kvm_v2_record *rec)
 		return;
 
 	kvm_v2_record_disarm(rec);
+	mutex_lock(&rec->lock);
+	kvm_v2_record_release_snapshot_locked(rec);
+	mutex_unlock(&rec->lock);
 	kvfree(rec->buffer);
 	mutex_destroy(&rec->lock);
 	kfree(rec);
@@ -201,7 +215,19 @@ static int kvm_v2_record_claim_active(struct kvm_v2_record *rec)
 	return rc;
 }
 
-int kvm_v2_record_start(struct kvm_v2_record *rec)
+static void kvm_v2_record_unclaim_active(struct kvm_v2_record *rec)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&um_kvm_v2_record_lock, flags);
+	if (um_kvm_v2_active_record == rec)
+		um_kvm_v2_active_record = NULL;
+	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
+}
+
+static int __kvm_v2_record_start(struct kvm_v2_record *rec,
+				 struct kvm_v2_snapshot *snapshot,
+				 bool snapshot_attempted)
 {
 	int rc;
 
@@ -220,6 +246,11 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 		goto out_unlock;
 
 	kvm_v2_record_reset_counters(rec);
+	kvm_v2_record_release_snapshot_locked(rec);
+	rec->snapshot = snapshot;
+	rec->snapshot_attempted = snapshot_attempted;
+	rec->snapshot_valid = !!snapshot;
+	rec->snapshot_rc = 0;
 	rec->state = KVM_V2_RECORD_RECORDING;
 	kvm_v2_record_set_gadget_bypass(true);
 	static_branch_enable(&um_kvm_v2_record_enabled);
@@ -228,7 +259,58 @@ out_unlock:
 	mutex_unlock(&rec->lock);
 	return rc;
 }
+
+int kvm_v2_record_start(struct kvm_v2_record *rec)
+{
+	return __kvm_v2_record_start(rec, NULL, false);
+}
 EXPORT_SYMBOL_GPL(kvm_v2_record_start);
+
+static void kvm_v2_record_note_snapshot_failure(struct kvm_v2_record *rec,
+						int rc)
+{
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+	if (rec->state != KVM_V2_RECORD_RECORDING &&
+	    rec->state != KVM_V2_RECORD_REPLAYING) {
+		kvm_v2_record_release_snapshot_locked(rec);
+		rec->snapshot_attempted = true;
+		rec->snapshot_valid = false;
+		rec->snapshot_rc = rc;
+	}
+	mutex_unlock(&rec->lock);
+}
+
+int kvm_v2_record_start_with_snapshot(struct kvm_v2_record *rec)
+{
+	struct kvm_v2_snapshot *snapshot;
+	int rc;
+
+	if (!rec)
+		return -EINVAL;
+
+	snapshot = kvm_v2_snapshot_alloc();
+	if (!snapshot) {
+		kvm_v2_record_note_snapshot_failure(rec, -ENOMEM);
+		return -ENOMEM;
+	}
+
+	rc = kvm_v2_snapshot_capture_task(snapshot, NULL);
+	if (rc < 0) {
+		kvm_v2_snapshot_destroy(snapshot);
+		kvm_v2_record_note_snapshot_failure(rec, rc);
+		return rc;
+	}
+
+	rc = __kvm_v2_record_start(rec, snapshot, true);
+	if (rc < 0)
+		kvm_v2_snapshot_destroy(snapshot);
+
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_start_with_snapshot);
 
 int kvm_v2_record_stop(struct kvm_v2_record *rec)
 {
@@ -266,6 +348,16 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	rc = kvm_v2_record_claim_active(rec);
 	if (rc)
 		goto out_unlock;
+
+	if (rec->snapshot_valid) {
+		rc = kvm_v2_snapshot_restore_task(rec->snapshot, NULL);
+		if (rc < 0) {
+			rec->snapshot_rc = rc;
+			kvm_v2_record_unclaim_active(rec);
+			goto out_unlock;
+		}
+		rec->snapshot_rc = 0;
+	}
 
 	rec->state = KVM_V2_RECORD_REPLAYING;
 	rec->buffer_replayed = 0;
@@ -514,7 +606,7 @@ static int kvm_v2_record_debugfs_command(char *buf)
 		rc = kvm_v2_record_debugfs_ensure(buffer_size);
 		if (rc < 0)
 			goto out_unlock;
-		rc = kvm_v2_record_start(kvm_v2_record_debugfs_rec);
+		rc = kvm_v2_record_start_with_snapshot(kvm_v2_record_debugfs_rec);
 	} else if (!strcmp(cmd, "stop")) {
 		if (!kvm_v2_record_debugfs_rec) {
 			rc = -ENOENT;
@@ -592,6 +684,16 @@ static int kvm_v2_record_status_show(struct seq_file *m, void *v)
 	seq_printf(m, "state: %s\n", kvm_v2_record_state_name(rec->state));
 	seq_printf(m, "enabled: %u\n", enabled ? 1 : 0);
 	seq_printf(m, "strict: %u\n", rec->strict_replay ? 1 : 0);
+	seq_printf(m, "snapshot_attempted: %u\n",
+		   rec->snapshot_attempted ? 1 : 0);
+	seq_printf(m, "snapshot_valid: %u\n", rec->snapshot_valid ? 1 : 0);
+	seq_printf(m, "snapshot_rc: %d\n", rec->snapshot_rc);
+	seq_printf(m, "snapshot_memslots: %d\n",
+		   rec->snapshot ? rec->snapshot->memslot_count : 0);
+	seq_printf(m, "snapshot_task_state: %u\n",
+		   rec->snapshot && rec->snapshot->task_state_captured ? 1 : 0);
+	seq_printf(m, "snapshot_source_pid: %d\n",
+		   rec->snapshot ? rec->snapshot->task_source_pid : 0);
 	seq_printf(m, "buffer_size: %zu\n", rec->buffer_size);
 	seq_printf(m, "buffer_used: %zu\n", rec->buffer_used);
 	seq_printf(m, "buffer_replayed: %zu\n", rec->buffer_replayed);

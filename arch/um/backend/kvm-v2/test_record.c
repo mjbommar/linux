@@ -256,6 +256,36 @@ static void test_record_buffer_overflow_is_counted(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void test_record_reset_releases_snapshot(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	struct kvm_v2_snapshot *snapshot;
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	snapshot = kvm_v2_snapshot_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, snapshot);
+
+	snapshot->task_state_captured = true;
+	snapshot->task_source_pid = 123;
+	rec->snapshot = snapshot;
+	rec->snapshot_attempted = true;
+	rec->snapshot_valid = true;
+	rec->snapshot_rc = 0;
+	rec->state = KVM_V2_RECORD_STOPPED;
+
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_reset(rec), 0);
+	KUNIT_EXPECT_PTR_EQ(test, rec->snapshot,
+			    (struct kvm_v2_snapshot *)NULL);
+	KUNIT_EXPECT_FALSE(test, rec->snapshot_attempted);
+	KUNIT_EXPECT_FALSE(test, rec->snapshot_valid);
+	KUNIT_EXPECT_EQ(test, rec->snapshot_rc, 0);
+	KUNIT_EXPECT_EQ(test, rec->state, KVM_V2_RECORD_INIT);
+	KUNIT_EXPECT_TRUE(test, rec->strict_replay);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_lifecycle),
 	KUNIT_CASE(test_record_invalid_transitions),
@@ -265,6 +295,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
+	KUNIT_CASE(test_record_reset_releases_snapshot),
 	{}
 };
 

@@ -40,6 +40,10 @@ initial_state=$(status_value state)
 echo "start 1048576" > "$CTL" || fail "start command failed"
 [ "$(status_value state)" = "recording" ] || fail "state after start is $(status_value state)"
 [ "$(status_value enabled)" = "1" ] || fail "record static key did not enable"
+[ "$(status_value snapshot_attempted)" = "1" ] || fail "snapshot was not attempted"
+[ "$(status_value snapshot_valid)" = "1" ] || fail "snapshot was not attached"
+[ "$(status_value snapshot_rc)" = "0" ] || fail "snapshot_rc=$(status_value snapshot_rc)"
+[ "$(status_value snapshot_task_state)" = "1" ] || fail "task state was not captured"
 
 for i in 1 2 3 4 5; do
 	cat /proc/self/stat >/dev/null
@@ -72,6 +76,7 @@ echo "strict 1" > "$CTL" || fail "strict 1 failed"
 
 echo destroy > "$CTL" || fail "destroy command failed"
 [ "$(status_value state)" = "init" ] || fail "state after destroy is $(status_value state)"
+[ "$(status_value snapshot_valid)" = "0" ] || fail "snapshot still attached after destroy"
 [ "$(status_value buffer_used)" = "0" ] || fail "buffer_used not reset"
 [ "$(status_value entries_recorded)" = "0" ] || fail "entries_recorded not reset"
 

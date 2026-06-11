@@ -741,6 +741,10 @@ struct kvm_v2_replay_entry {
 struct kvm_v2_record {
 	enum kvm_v2_record_state	state;
 	bool				strict_replay;
+	struct kvm_v2_snapshot		*snapshot;
+	bool				snapshot_attempted;
+	bool				snapshot_valid;
+	int				snapshot_rc;
 	void				*buffer;
 	size_t				buffer_size;
 	size_t				buffer_used;
@@ -761,6 +765,7 @@ void kvm_v2_record_destroy(struct kvm_v2_record *rec);
 void kvm_v2_record_free(struct kvm_v2_record *rec);
 int kvm_v2_record_reset(struct kvm_v2_record *rec);
 int kvm_v2_record_start(struct kvm_v2_record *rec);
+int kvm_v2_record_start_with_snapshot(struct kvm_v2_record *rec);
 int kvm_v2_record_stop(struct kvm_v2_record *rec);
 int kvm_v2_record_replay(struct kvm_v2_record *rec);
 int kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);

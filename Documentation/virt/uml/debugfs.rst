@@ -114,15 +114,17 @@ record container control surface:
       destroy
 
     ``start`` allocates the singleton debugfs record container on first
-    use and enables the KVM v2 record static key. ``bytes`` is optional;
-    the default buffer is 64 KiB and the maximum is 64 MiB. Once the
-    singleton exists, later ``start`` commands may only request a size
-    no larger than the existing buffer. ``stop`` disables the static key.
-    ``destroy`` stops an active session if needed and resets the
-    singleton to ``init`` state; the storage stays allocated for the
+    use, captures a KVM v2 task snapshot, attaches it to the record
+    session, and enables the KVM v2 record static key. ``bytes`` is
+    optional; the default buffer is 64 KiB and the maximum is 64 MiB.
+    Once the singleton exists, later ``start`` commands may only request
+    a size no larger than the existing buffer. ``stop`` disables the
+    static key. ``destroy`` stops an active session if needed and resets
+    the singleton to ``init`` state; the storage stays allocated for the
     lifetime of the UML instance so no live dispatcher can observe freed
-    record memory. ``replay`` is available for the experimental core, but
-    deterministic workload replay is not yet a supported user workflow.
+    record memory. ``replay`` restores the attached snapshot before
+    entering the experimental syscall replay core, but deterministic
+    workload replay is not yet a supported user workflow.
 
 ``kvm_v2_record_status``
     Read-only status and counters. Example after stopping a live record
@@ -131,19 +133,26 @@ record container control surface:
       state: stopped
       enabled: 0
       strict: 1
+      snapshot_attempted: 1
+      snapshot_valid: 1
+      snapshot_rc: 0
+      snapshot_memslots: 2
+      snapshot_task_state: 1
+      snapshot_source_pid: 1
       buffer_size: 1048576
-      buffer_used: 190320
+      buffer_used: 245360
       buffer_replayed: 0
-      sequence: 2379
-      entries_recorded: 2379
+      sequence: 3067
+      entries_recorded: 3067
       entries_replayed: 0
       entries_dropped: 0
-      syscall_count: 2379
+      syscall_count: 3067
 
 The record path is still explicitly experimental. It can record live
 KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
-bypass path, but full deterministic replay still needs the snapshot,
-time, signal, and device policy described in the redesign plan.
+bypass path, and it can pair a record session with a KVM v2 task snapshot.
+Full deterministic replay still needs the time, signal, and device policy
+described in the redesign plan.
 
 Cost impact
 ===========

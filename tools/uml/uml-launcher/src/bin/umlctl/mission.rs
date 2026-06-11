@@ -6,7 +6,7 @@
 // Six fail-fast steps, ~10-15 min total:
 //
 //   1. KUnit selftests       - snapshot-kvm-smoke (4 cases) +
-//                              kvm-record-smoke (8 cases + live record).
+//                              kvm-record-smoke (9 cases + live record).
 //                              Proves the new snapshot/RR code
 //                              paths execute correctly.
 //

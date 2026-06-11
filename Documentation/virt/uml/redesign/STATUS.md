@@ -47,8 +47,9 @@ Current source-tree direction:
 - KVM v2 record/replay has an experimental core on `next` behind
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; its live syscall
   dispatcher hook can observe and replay syscall return values, and debugfs can
-  start/stop/reset a singleton record container for validation. Snapshot,
-  time, signal, device, and deterministic replay policy remain incomplete.
+  start/stop/reset a singleton record container for validation. Debugfs record
+  start also captures and attaches a KVM v2 task snapshot. Time, signal,
+  device, and deterministic replay policy remain incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -96,16 +97,17 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 8/8 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 9/9 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
   divergence cursor preservation, buffer-overflow accounting, and the
-  synthetic gadget-bypass page helper. The live KVM syscall dispatcher now
-  calls the observe/consume hooks, so this is no longer core-only syscall
-  plumbing.
+  synthetic gadget-bypass page helper, and snapshot metadata cleanup. The live
+  KVM syscall dispatcher now calls the observe/consume hooks, so this is no
+  longer core-only syscall plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
-  debugfs control surface, recording 2379 live KVM v2 syscall entries with
-  190320 bytes used and 0 drops.
+  debugfs control surface, captures and attaches a KVM v2 task snapshot at
+  record start, and records 3067 live KVM v2 syscall entries with 245360
+  bytes used and 0 drops.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 
@@ -121,8 +123,8 @@ Remaining validation before publication or completion:
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
   stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
-- finish record/replay snapshot, time, signal, device, and deterministic replay
-  policy before counting the original record/replay mission complete;
+- finish record/replay time, signal, device, and deterministic replay policy
+  before counting the original record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.
@@ -369,9 +371,9 @@ KVM-specific record/replay is present as an experimental core with KUnit
 coverage. Gadget-handled syscalls now have record/replay bypass plumbing: the
 active record static key synchronizes a per-vCPU gadget-state byte, and the
 LSTAR gadget falls back to the host dispatcher when that byte is set. Live
-syscall recording is now covered by the `kvm-record-smoke` debugfs test.
-Snapshot integration, time/RDTSC/signal determinism, and workload-level replay
-smokes remain open.
+syscall recording and snapshot-backed record start are now covered by the
+`kvm-record-smoke` debugfs test. Time/RDTSC/signal determinism and
+workload-level replay smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field
