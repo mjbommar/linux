@@ -356,6 +356,13 @@ KVM-specific record/replay is present only as an experimental core with KUnit
 coverage. Live syscall interception, gadget interaction, snapshot integration,
 time/RDTSC/signal determinism, and workload-level replay smokes remain open.
 
+The private state-trace ring remains historical reference material. The
+historical source is not a clean import target because it contains stale field
+assumptions and investigation-specific auto-freeze logic. Current `next` uses
+normal `TRACE_EVENT` coverage as the supported KVM v2 observability surface;
+state trace should only return as a bounded optional debug facility with fresh
+tests and parser coverage.
+
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage, live `umlctl` ELF export validation, snapshot
 benchmark, snapshot KUnit wrapper, snapshot ELF roundtrip, and restore smoke

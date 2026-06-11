@@ -677,6 +677,22 @@ Acceptance gates:
 - Parser smoke test.
 - Documentation for debugfs files.
 
+Current `next` decision:
+
+- Do not import the historical `state_trace.c` / `state_trace.h` wholesale.
+  The old implementation is an investigation artifact: it carries stale
+  field assumptions, bug-trigger auto-freeze logic, and comments tied to
+  specific debugging rounds.
+- Current `next` keeps normal `TRACE_EVENT` coverage under
+  `arch/um/include/asm/trace/um_backend.h` as the supported observability
+  surface.
+- Private state trace remains a future optional diagnostic, not a runtime
+  functionality blocker. If it is restored, implement a clean debug-only
+  version from the current KVM v2 state model with bounded memory use, stable
+  debugfs controls, a minimal hook set, and parser/smoke coverage.
+- Historical parser tools remain reference material until the kernel-side
+  trace format is deliberately reintroduced.
+
 ## Workstream E: Template Pause, Fork Server, And Pool
 
 Purpose:
