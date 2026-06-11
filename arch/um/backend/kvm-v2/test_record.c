@@ -585,6 +585,61 @@ static void test_record_strict_syscall_gate(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void test_record_strict_time_policy(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	unsigned long rejected = 0;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+#ifdef __NR_clock_gettime
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_has_payload(__NR_clock_gettime));
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_supported(__NR_clock_gettime));
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_check_strict_syscall(rec,
+							   __NR_clock_gettime),
+			-EOPNOTSUPP);
+	rejected++;
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, rejected);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall,
+			(long)__NR_clock_gettime);
+#endif
+#ifdef __NR_gettimeofday
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_has_payload(__NR_gettimeofday));
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_supported(__NR_gettimeofday));
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_check_strict_syscall(rec,
+							   __NR_gettimeofday),
+			-EOPNOTSUPP);
+	rejected++;
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, rejected);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall,
+			(long)__NR_gettimeofday);
+#endif
+#ifdef __NR_time
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_has_payload(__NR_time));
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_supported(__NR_time));
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_check_strict_syscall(rec, __NR_time),
+			-EOPNOTSUPP);
+	rejected++;
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, rejected);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall,
+			(long)__NR_time);
+#endif
+
+	kvm_v2_record_destroy(rec);
+}
+
 static void test_record_time_travel_fifo(struct kunit *test)
 {
 	static const u64 ns_values[] = {
@@ -710,6 +765,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),
 	KUNIT_CASE(test_record_strict_replay_failure_is_counted),
 	KUNIT_CASE(test_record_strict_syscall_gate),
+	KUNIT_CASE(test_record_strict_time_policy),
 	KUNIT_CASE(test_record_time_travel_fifo),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
 	KUNIT_CASE(test_record_reset_releases_snapshot),

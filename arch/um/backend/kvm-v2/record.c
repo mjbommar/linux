@@ -465,6 +465,14 @@ struct kvm_v2_record *kvm_v2_record_active(void)
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_active);
 
+bool kvm_v2_record_replay_active(void)
+{
+	struct kvm_v2_record *rec = kvm_v2_record_active();
+
+	return rec && READ_ONCE(rec->state) == KVM_V2_RECORD_REPLAYING;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_replay_active);
+
 static void kvm_v2_record_fill_syscall_args(u64 args[6],
 					    const struct uml_pt_regs *regs)
 {

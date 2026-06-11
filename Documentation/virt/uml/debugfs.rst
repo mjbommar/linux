@@ -202,9 +202,12 @@ the syscall number and arguments match. Strict replay currently allows the
 R/R-1 scalar task-owned subset (``getpid``, ``getppid``, ``gettid``) plus
 payload-aware ``uname(2)`` and ``getcwd(2)``; other syscalls fail closed and
 update the strict replay failure counters instead of falling back to live
-execution. Full deterministic replay still needs broader payload coverage plus
-raw time/RDTSC, signal, and device policy described in the redesign plan. The
-current in-memory event format is versioned and
+execution. Raw time syscalls such as ``clock_gettime(2)``, ``gettimeofday(2)``,
+and ``time(2)`` are outside the current replay set, and replay mode disables
+direct user ``RDTSC``/``RDTSCP`` with CR4.TSD so those observations fail
+closed instead of escaping the log. Full deterministic replay still needs
+broader payload coverage plus signal and device policy described in the
+redesign plan. The current in-memory event format is versioned and
 debugfs reports its header size, total fixed entry size, and maximum
 variable payload length so validation tools can reject stale logs instead of
 guessing their shape.

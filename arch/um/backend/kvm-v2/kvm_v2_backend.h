@@ -810,6 +810,8 @@ int kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
 bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
 bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr);
 bool kvm_v2_record_syscall_supported(unsigned long syscall_nr);
+struct kvm_v2_record *kvm_v2_record_active(void);
+bool kvm_v2_record_replay_active(void);
 int kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
 				       unsigned long syscall_nr);
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on);

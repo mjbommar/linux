@@ -1354,6 +1354,22 @@ static void kvm_v2_force_guest_tlb_flush(struct kvm_sregs *sregs)
 	sregs->cr4 ^= X86_CR4_PGE;
 }
 
+static void kvm_v2_apply_record_time_policy(struct kvm_sregs *sregs)
+{
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+	/*
+	 * Direct user RDTSC/RDTSCP observes host time outside the replay log.
+	 * CR4.TSD makes those instructions fault at CPL=3 while strict replay
+	 * is active; syscall time sources still reach the strict replay gate.
+	 */
+	if (static_branch_unlikely(&um_kvm_v2_record_enabled) &&
+	    kvm_v2_record_replay_active())
+		sregs->cr4 |= X86_CR4_TSD;
+	else
+		sregs->cr4 &= ~X86_CR4_TSD;
+#endif
+}
+
 static void kvm_v2_load_user_efer(struct kvm_sregs *sregs)
 {
 	/*
@@ -1455,6 +1471,7 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	kvm_v2_restore_or_clear_cr2(vcpu, sregs);
 	kvm_v2_note_fpu_owner_change(vcpu);
 	kvm_v2_force_guest_tlb_flush(sregs);
+	kvm_v2_apply_record_time_policy(sregs);
 	kvm_v2_update_dispatch_tlb_state(vcpu);
 	kvm_v2_load_user_efer(sregs);
 	kvm_v2_arm_lazy_fpu_trap(sregs);
