@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, and x86 UML ptrace/TLS regset cleanup.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, and substrate gate tightening.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -84,8 +84,10 @@ The strongest current KVM v2 evidence is:
 
 - CPython parity: 21/21 curated standard-library modules match the seccomp
   backend under both UP and SMP configurations.
-- Substrate gate: KVM v2 matches the seccomp baseline at 25 pass, 3 fail,
-  and 3 expected-fail results.
+- Substrate gate: seccomp reports 25 pass, 3 fail, and 3 expected-fail
+  results; KVM v2 reports 27 pass, 3 fail, and 1 expected-fail result on the
+  same repro set. The `regrtest-substrate` gate now uses 25 as the shared pass
+  floor and 3 as the known-fail ceiling.
 - SMP stress: the mt-mmap-stress family, threaded subprocess, and threaded
   fork/malloc checks pass on the post-fix KVM v2 builds recorded in the
   redesign archive.
@@ -479,7 +481,9 @@ Before treating UML v2 as publishable, verify:
 - `make ARCH=um O=<build-dir> -j$(nproc) vmlinux` passes on the cleaned tree;
 - KVM v2 KUnit suites pass in the configured UML build;
 - CPython parity remains 21/21 against seccomp;
-- the substrate gate still matches seccomp;
+- the substrate gate stays at or above the current shared floor: seccomp
+  `PASS=25 FAIL=3 EXPECTED_FAIL=3`, KVM v2
+  `PASS=27 FAIL=3 EXPECTED_FAIL=1`;
 - the final KVM v2 24-hour soak completes naturally;
 - vector2 Tier 3 runs complete on both seccomp and KVM v2 where applicable;
 - checkpatch on changed KVM v2 patches has no unexplained warnings;

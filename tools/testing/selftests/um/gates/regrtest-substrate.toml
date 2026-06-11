@@ -15,14 +15,10 @@
 #
 # Thresholds reflect the CURRENT LINE, not a target.
 #   - seccomp: PASS=25 FAIL=3 EXPECTED_FAIL=3
-#   - kvm-v2:  the PASS count varies by backend; today the class-a-env
-#              subset is 6 while the class-b/c/d fork-state cases
-#              remain open.
+#   - kvm-v2:  PASS=27 FAIL=3 EXPECTED_FAIL=1
 # A single threshold pair has to cover both backends, so we set the
 # floor at the WORSE backend's current PASS count and the ceiling at
-# the BETTER backend's FAIL tolerance. That gives v2 a hard "don't
-# regress past 6" floor and seccomp a softer one (it's currently
-# 25; any drop is still a PASS-delta in `umlctl gate diff`).
+# the shared known-fail tolerance.
 #
 # Loosening either threshold requires an explicit reason. Tightening
 # as v2 catches up to seccomp is just progress; bump min_pass.
@@ -52,13 +48,12 @@ fail_regex          = "^REPRO: \\S+ FAIL"
 expected_fail_regex = "^REPRO: \\S+ EXPECTED_FAIL"
 
 [thresholds]
-# Worst-backend (kvm-v2 substrate) floor. Pre-TLB-fix line was
-# PASS=4..9 mode=4. Post-TLB-fix at 11102c8176fb + 3d426c4cb0c7
-# the line is PASS=5..10 with mode=5. Threshold 5 reflects the
-# CURRENT floor; regressions below 5 surface as gate FAILs.
-min_pass  = 5
-# seccomp's current line; v2 is allowed to ride at this ceiling
-# until the class-b/c/d fork-state cases close.
+# Current worst-backend floor: seccomp reports 25 PASS and kvm-v2
+# reports 27 PASS on the same repro set. Any drop below 25 is a
+# substrate regression.
+min_pass  = 25
+# Both backends still report the same three ordinary failures in
+# class-a-env; the gate remains strict about not growing that set.
 max_fail  = 3
 # The harness exits 1 whenever FAIL>0; that's already captured by
 # max_fail. A boot-level failure (kernel panic, OOM) still shows up
