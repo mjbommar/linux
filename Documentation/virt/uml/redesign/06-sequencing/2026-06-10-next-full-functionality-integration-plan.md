@@ -910,7 +910,12 @@ Acceptance gates:
   1.6090 MiB/s, ratio 0.6209. The host-to-guest no-regression cell remains
   open. The helper now emits `aggregate.tsv` and `comparison.tsv` so future
   fixed-byte runs expose per-driver medians/bests and vector2/vector ratios
-  without hand parsing raw rows.
+  without hand parsing raw rows. A current-head 1 MiB host-to-guest rerun
+  through those files reports vector2/vector host-side median ratio 0.8240,
+  host-side best ratio 0.4969, and scheduler pcount median ratio 4.5529.  That
+  keeps the no-regression cell open: the legacy baseline was noisy, and
+  vector2 still trails on best throughput while using substantially more
+  scheduler wakeups.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,

@@ -386,6 +386,16 @@ Current bounded vector2 evidence adds:
   at 18 fields, and comparison rows at 15 fields.  This does not close the
   CPU-utilisation or syscall-rate publication gates; it makes the existing
   unprivileged timing and scheduler evidence directly auditable.
+- A current-head 1 MiB host-to-guest TCP rerun using those derived files
+  confirmed the aggregate/comparison path on the open cell.  All raw summary
+  rows had 22 fields, aggregate rows had 18 fields, and the comparison row had
+  15 fields.  `aggregate.tsv` reported host-side medians of 0.8720 MiB/s for
+  legacy vector and 0.7185 MiB/s for vector2; `comparison.tsv` reported a
+  vector2/vector host median ratio of 0.8240, host best ratio of 0.4969, and
+  scheduler pcount median ratio of 4.5529.  This keeps the 1 MiB
+  host-to-guest no-regression cell open: the legacy baseline was noisy in
+  this run, and vector2 still trailed on best throughput while using
+  substantially more scheduler wakeups.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
