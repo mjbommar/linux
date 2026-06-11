@@ -524,7 +524,8 @@ section), `Documentation/virt/uml/redesign/scripts/uml-boot-matrix.sh`
 **Status:** Accepted
 
 **Decision:** The recommendations in
-`Documentation/virt/uml/review-01/README.md` are triaged into two
+`Documentation/virt/uml/redesign/07-references/review-01/README.md` are
+triaged into two
 buckets before any edits:
 
 1. **Real deviations from the plan** (must correct) — issues where the
@@ -565,8 +566,11 @@ weighted followups. Rejected because it conflates policy ("finish
 what you started") with scope drift ("do workstreams B/C/D in A's
 commit window").
 
-**Cross-reference:** `Documentation/virt/uml/review-01/README.md`
-(the review itself), `review-01/RESPONSE.md` (per-item response),
+**Cross-reference:**
+`Documentation/virt/uml/redesign/07-references/review-01/README.md` (the
+review itself),
+`Documentation/virt/uml/redesign/07-references/review-01/RESPONSE.md`
+(per-item response),
 `02-workstreams/A-backend-abstraction/notes/recon-audit.md`
 (file-by-file verdict for the RECON pass).
 
