@@ -164,8 +164,9 @@ Typical run::
 
 A clean run reports
 ``KPROBES_STRESS: PASS iters=N fires=M errors=0 graph=<on|deferred>``.
-Function graph tracing is not advertised on UML, so the current
-expected graph token is ``deferred``.
+The graph token reports whether the generic kprobe sanity test saw
+graph-related probe coverage in the booted profile; the 2026-06-10
+research-profile validation reported ``graph=on``.
 
 Further reading
 ===============

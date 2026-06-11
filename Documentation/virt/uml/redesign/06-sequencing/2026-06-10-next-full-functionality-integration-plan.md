@@ -1030,9 +1030,9 @@ Acceptance gates:
   because its return-address rewriting still conflicts with UML task switching.
 - Hooks flip smoke. Current status: PASS on 2026-06-10 against the current
   `./linux` build.
-- kprobes stress. Current status: SKIP on 2026-06-10 against the current
-  `./linux` build because `kretprobe_example.ko` was not built; rerun with a
-  research-profile build and sample module.
+- kprobes stress. Current status: PASS on 2026-06-10 against a clean-worktree
+  research-profile UML build with `samples/kprobes/kretprobe_example.ko`:
+  `KPROBES_STRESS: PASS iters=1000 fires=1004 errors=0 graph=on`.
 - KMSAN smoke. Current status: SKIP on 2026-06-10 against the current
   `./linux` build because it does not contain the KMSAN runtime; rerun with
   `LLVM=1 uml/research-kmsan`.
