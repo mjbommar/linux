@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, and CPython tier-0 gate evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, and KGDB disposition cleanup.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -73,6 +73,12 @@ Current source-tree direction:
   task's FS/GS base state instead of `current`, removed obsolete `XXX` include
   and ptrace comments, and replaced the 32-bit TLS-regset TODO with an
   `NT_386_TLS` regset backed by UML's existing TLS entry cache.
+- KGDB is deferred, not implemented. Current UML does not select
+  `HAVE_ARCH_KGDB`, the live profile fragments do not enable `CONFIG_KGDB`,
+  and the profile docs no longer claim KGDB as an available research or
+  time-travel feature. Re-enabling it requires UML architecture support,
+  backend register read/write integration, a transport decision, and a smoke
+  test.
 - The old report/deck workspace under `report-presentation/` is marked as a
   historical May 2026 artifact. Its report, slides, comprehensive report,
   generated PDFs, and CSV data point readers back to this status file and the
@@ -448,6 +454,8 @@ Current instrumentation evidence:
   `first_pc=0x605daf39`; and
 - KMSAN still requires the matching profile binary and guest tooling for
   runtime closure.
+- KGDB is not part of any current UML profile. This is an explicit deferral,
+  not a validated feature.
 
 ## Historical-Only Work
 
@@ -487,6 +495,8 @@ Before treating UML v2 as publishable, verify:
 - CPython parity remains 21/21 against seccomp;
 - `cpython-tier0` continues to pass through `umlctl gate run` for both seccomp
   and KVM v2;
+- KGDB remains absent unless a future slice adds `HAVE_ARCH_KGDB`, backend
+  register access, transport support, and a smoke test;
 - the substrate gate stays at or above the current shared floor: seccomp
   `PASS=25 FAIL=3 EXPECTED_FAIL=3`, KVM v2
   `PASS=27 FAIL=3 EXPECTED_FAIL=1`;

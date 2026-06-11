@@ -196,7 +196,7 @@ they are implemented and validated, or explicitly retired with approval.
 | --- | --- | --- |
 | Record/replay supported tier | The original vision names deterministic time-travel and record/replay as first-class functionality. Current `next` has an experimental core, live syscall hook, snapshot-backed start, and time-travel clock-event logging, but raw time/RDTSC/vvar, signals, device I/O, randomness, and deterministic workload policy are incomplete. | Define the first supported tier, implement missing policy, pass KUnit/live/deterministic workload gates, and document unsupported operations; or explicitly exclude record/replay from the completion claim as experimental. |
 | KMSAN runtime | The original instrumentation goal includes KMSAN. Current `next` builds `uml/research-kmsan` with LLVM and fixes the vmalloc metadata layout, but `kmsan-smoke` still fails before the result marker. | Fix the UML/KMSAN runtime metadata/stack/context issue or document the exact kernel blocker and decide whether KMSAN can remain non-completion. |
-| KGDB disposition | The original instrumentation list includes KGDB, but the current inventory marks it as undecided. | Implement and smoke KGDB, or explicitly retire/defer it with rationale. |
+| KGDB disposition | The original instrumentation list includes KGDB, but current UML does not select `HAVE_ARCH_KGDB` and no live profile fragment enables `CONFIG_KGDB`. | KGDB is deferred-not-present in the current completion tracker. Reintroduce it only with UML architecture support, backend register access, a transport decision, and a smoke test. |
 | Vector2 publication readiness | Vector2 has strong focused and long seccomp evidence, but the replacement/publication claim still needs final Tier 3, KVM v2, and multiqueue/fairness coverage. | Finish the natural seccomp long run, run equivalent KVM v2 Tier 3 networking, add fairness/performance evidence, and keep parser-only transports out of runtime claims. |
 | KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
 | Pool/fork-server final regression pass | The pool path is mostly closed, but final validation must be rerun after KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
@@ -374,13 +374,17 @@ Current state:
   exist. The vmalloc metadata range alignment bug is fixed on `next`, but the
   runtime smoke still fails before its result marker with early KMSAN reports
   in kthread-name, scheduler, credential, and stack/string metadata paths.
-- KGDB remains undecided.
+- KGDB is deferred-not-present: the current tree does not select
+  `HAVE_ARCH_KGDB`, no live UML profile fragment enables `CONFIG_KGDB`, and
+  the active profile docs no longer claim KGDB as available.
 
 Remaining tasks:
 
 - Build each kernel profile from a clean worktree.
 - Run each profile's runtime probe against a matching binary.
-- Finish or retire KGDB.
+- Keep KGDB out of current feature claims unless a future slice implements
+  UML `HAVE_ARCH_KGDB`, backend register access, transport support, and a
+  smoke test.
 - Finish KMSAN runtime validation or document the exact blocker.
 - Keep ftrace claims bounded to supported tracing modes.
 - Ensure `umlbuild` profiles and kernel Kconfig profiles do not drift.

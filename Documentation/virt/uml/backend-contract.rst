@@ -214,7 +214,8 @@ Debug / introspection (3 ops)
 
 ``read_guest_regs(t, regs)``
     Cold. Read the live guest register state for task ``t`` into
-    ``*regs``. Used by KGDB and debugger tooling.
+    ``*regs``. Reserved for future KGDB integration and debugger
+    tooling.
 
 ``write_guest_regs(t, regs)``
     Cold. Write ``*regs`` into the live guest register state for

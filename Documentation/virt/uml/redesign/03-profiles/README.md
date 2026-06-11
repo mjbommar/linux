@@ -9,13 +9,13 @@ the units we ship.
 |---|---|---|---|---|---|---|---|---|---|
 | [prod-fast](prod-fast.md) | KVM > seccomp | none | n/a | none | none | no | no | no | no |
 | [prod-with-hooks](prod-with-hooks.md) | KVM > seccomp | all | none | none | none | no | no | no | no |
-| [research](research.md) | seccomp | all | trace, kprobes | KASAN, UBSAN | ftrace, kprobes, BPF | yes | yes | no | yes (opt) |
+| [research](research.md) | seccomp | all | trace, kprobes | KASAN, UBSAN | ftrace, kprobes, BPF | yes | no | no | yes (opt) |
 | [fuzz](fuzz.md) | seccomp | KCOV, snapshot | KCOV | KASAN | none | no | no | yes | no |
 | [fuzz-deep](fuzz-deep.md) | seccomp | KCOV, snapshot, replay | KCOV, replay | KASAN, KCSAN | none | no | no | yes | no |
 | [sandbox](sandbox.md) | seccomp-only | none | n/a | none | none | no | no | no | no |
 | [library](library.md) | none (direct call) | n/a | n/a | KASAN (opt) | none | n/a | n/a | n/a | n/a |
 | [embedded](embedded.md) | ptrace | none | n/a | none | none | yes | no | no | no |
-| [time-travel](time-travel.md) | seccomp | all | trace, time-travel | KASAN | ftrace | yes | yes | yes | yes (forced) |
+| [time-travel](time-travel.md) | seccomp | all | trace, time-travel | KASAN | ftrace | yes | no | yes | yes (forced) |
 
 ## How to read this
 
@@ -30,6 +30,11 @@ the units we ship.
   binary, slower runtime, more bugs caught.
 - **Tracers / mconsole / KGDB / Snapshot / Time-travel**: feature
   presence, mostly Kconfig-gated.
+
+KGDB is currently deferred for UML. The architecture does not select
+`HAVE_ARCH_KGDB`, and the live profile fragments do not enable
+`CONFIG_KGDB`; older profile notes that described KGDB as present were
+historical intent, not current implementation.
 
 ## Per-profile cost summary
 

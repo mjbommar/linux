@@ -17,7 +17,9 @@ on; slow but useful.
 - All Layer 2 hooks: compiled in; trace and kprobes default ON.
 - Sanitizers: KASAN + UBSAN compiled in (KMSAN optional).
 - Tracers: ftrace, kprobes, BPF JIT all on.
-- Debug surfaces: mconsole, KGDB, full debug info.
+- Debug surfaces: mconsole and full debug info. KGDB is deferred:
+  current UML does not select `HAVE_ARCH_KGDB` and this profile's
+  real Kconfig fragment does not enable `CONFIG_KGDB`.
 - Time-travel: optional, off by default; one Kconfig away.
 - 64-bit only.
 
@@ -46,7 +48,6 @@ CONFIG_BPF_JIT=y
 CONFIG_BPF_SYSCALL=y
 
 CONFIG_MCONSOLE=y
-CONFIG_KGDB=y
 CONFIG_DEBUG_INFO=y
 CONFIG_DEBUG_INFO_DWARF5=y
 CONFIG_FRAME_POINTER=y
@@ -85,5 +86,6 @@ CONFIG_GDB_SCRIPTS=y
 
 - Time-travel: `time-travel=1` boot param turns on; promotes
   to time-travel-research effectively
-- KGDB: `kgdb=tcp:0:1234` enables remote KGDB
+- KGDB: not currently available in UML; use host-side GDB attach
+  plus mconsole/debugfs while KGDB remains deferred.
 - mconsole: always on, socket at boot path

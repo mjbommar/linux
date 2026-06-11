@@ -18,7 +18,8 @@ unique to UML.
   Record-replay gate compiled in.
 - Sanitizers: KASAN on.
 - Tracers: ftrace on (helps debugging deterministic replays).
-- mconsole, KGDB: yes.
+- mconsole: yes.
+- KGDB: deferred; current UML does not select `HAVE_ARCH_KGDB`.
 - Snapshot: yes (works alongside time-travel).
 - SMP: forced UP at boot (per conflict C2).
 - External time coordinator: optional; `time-travel=ext` mode.
@@ -38,7 +39,6 @@ CONFIG_KPROBES=y
 CONFIG_BPF_JIT=y
 
 CONFIG_MCONSOLE=y
-CONFIG_KGDB=y
 CONFIG_DEBUG_INFO_DWARF5=y
 
 CONFIG_SMP=n                       # invariant per conflict C2
