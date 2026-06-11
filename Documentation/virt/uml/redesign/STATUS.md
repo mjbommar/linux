@@ -393,9 +393,14 @@ Current instrumentation evidence:
 - KASAN is runtime-validated for the research profile: a fresh
   research-profile UML binary plus `mm/kasan/kasan_test.ko` passes
   `cve-repro` with `ok=10`, `not_ok=0`, `kasan_bugs=13`,
-  `guest_wall_s=0`, and `host_wall=2.71s`; and
-- KMSAN, KFENCE report generation, KCSAN, and KCOV still require the
-  matching profile binaries/modules and guest tooling for runtime closure.
+  `guest_wall_s=0`, and `host_wall=2.71s`;
+- KCOV is runtime-validated for the fuzz profile: a fresh fuzz-profile UML
+  binary has `CONFIG_KCOV=y`, `CONFIG_KCOV_ENABLE_COMPARISONS=y`, and
+  `CONFIG_KCOV_INSTRUMENT_ALL=y`, the runtime profile probe passes for
+  `fuzz`, and `kcov-smoke` passes with `mode=pc`, `entries=4094`, and
+  `first_pc=0x605daf39`; and
+- KMSAN, KFENCE report generation, and KCSAN still require the matching
+  profile binaries/modules and guest tooling for runtime closure.
 
 ## Historical-Only Work
 

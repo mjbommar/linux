@@ -1054,8 +1054,11 @@ Acceptance gates:
 - KCSAN runtime smoke. Current status: open; build and boot the `race`
   profile with `ncpus=2`, validate `debugfs_kcsan`, and capture selftest
   evidence.
-- KCOV runtime smoke. Current status: open; build and boot `fuzz` or
-  `fuzz-deep` and run a focused `/sys/kernel/debug/kcov` mmap/ioctl smoke.
+- KCOV runtime smoke. Current status: PASS on 2026-06-10 through
+  `kcov-smoke` against a fresh fuzz-profile UML binary:
+  `CONFIG_KCOV=y`, `CONFIG_KCOV_ENABLE_COMPARISONS=y`,
+  `CONFIG_KCOV_INSTRUMENT_ALL=y`, `PASS fuzz (6 features match)`,
+  and `KCOV_SMOKE: PASS mode=pc entries=4094 first_pc=0x605daf39`.
 - Profile harness alignment. Current status: fixed for `research`, which now
   expects `debugfs_kcov=ABSENT` because KCOV is intentionally isolated to
   fuzzing profiles.

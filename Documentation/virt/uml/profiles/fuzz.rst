@@ -77,8 +77,11 @@ Using KCOV with this profile
    // cover[0] is count; cover[1..] are PCs
 
 (Standard KCOV usage; see
-``Documentation/dev-tools/kcov.rst``. Verified to work on UML per
-the PARK.8 spike.)
+``Documentation/dev-tools/kcov.rst``. The
+``tools/testing/selftests/um/kcov-smoke/`` gate boots this profile,
+opens ``/sys/kernel/debug/kcov``, initializes and mmaps the buffer,
+enables ``KCOV_TRACE_PC``, runs syscalls, and requires nonzero
+coverage entries.)
 
 When to use something else
 ==========================
