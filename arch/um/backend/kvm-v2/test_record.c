@@ -14,6 +14,7 @@
 #include <linux/string.h>
 #include <linux/types.h>
 
+#include <asm/unistd.h>
 #include <sysdep/ptrace.h>
 
 #include "kvm_v2_backend.h"
@@ -129,6 +130,27 @@ static void test_record_gadget_bypass_page(struct kunit *test)
 
 	kvm_v2_record_set_gadget_bypass_page(state_page, false);
 	KUNIT_EXPECT_EQ(test, state_page[KVM_V2_GADGET_OFF_RECORD], (u8)0);
+}
+
+static void test_record_strict_syscall_policy(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_getpid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_getppid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_gettid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_uname));
+
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_has_payload(__NR_getpid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_has_payload(__NR_uname));
+	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_supported(__NR_getuid));
+
+#ifdef __NR_clock_gettime
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_supported(__NR_clock_gettime));
+#endif
+#ifdef __NR_getrandom
+	KUNIT_EXPECT_FALSE(test,
+			   kvm_v2_record_syscall_supported(__NR_getrandom));
+#endif
 }
 
 static void fill_syscall_regs(struct uml_pt_regs *regs)
@@ -552,6 +574,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_invalid_transitions),
 	KUNIT_CASE(test_record_single_active_owner),
 	KUNIT_CASE(test_record_gadget_bypass_page),
+	KUNIT_CASE(test_record_strict_syscall_policy),
 	KUNIT_CASE(test_record_observe_syscall),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_syscall_payload_fifo),

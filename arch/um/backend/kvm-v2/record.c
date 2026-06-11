@@ -24,6 +24,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
+#include <asm/unistd.h>
 #include <asm/um-hooks.h>
 #include <sysdep/ptrace.h>
 
@@ -56,6 +57,25 @@ const char *kvm_v2_record_state_name(enum kvm_v2_record_state state)
 	}
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_state_name);
+
+bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
+{
+	return syscall_nr == __NR_uname;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_syscall_has_payload);
+
+bool kvm_v2_record_syscall_supported(unsigned long syscall_nr)
+{
+	switch (syscall_nr) {
+	case __NR_getpid:
+	case __NR_getppid:
+	case __NR_gettid:
+		return true;
+	default:
+		return kvm_v2_record_syscall_has_payload(syscall_nr);
+	}
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_syscall_supported);
 
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on)
 {

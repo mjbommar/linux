@@ -68,7 +68,6 @@
 #include <asm/page.h>
 #include <asm/processor-flags.h>	/* X86_CR0_TS */
 #include <asm/trace/um_backend.h>
-#include <asm/unistd.h>
 
 #include <kern_util.h>		/* segv_handler, relay_signal */
 #include <os.h>			/* os_drop_caching */
@@ -1446,23 +1445,6 @@ static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
 }
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
-static bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
-{
-	return syscall_nr == __NR_uname;
-}
-
-static bool kvm_v2_record_syscall_supported(unsigned long syscall_nr)
-{
-	switch (syscall_nr) {
-	case __NR_getpid:
-	case __NR_getppid:
-	case __NR_gettid:
-		return true;
-	default:
-		return kvm_v2_record_syscall_has_payload(syscall_nr);
-	}
-}
-
 static bool kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
 					       unsigned long syscall_nr)
 {

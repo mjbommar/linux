@@ -6,16 +6,16 @@ Branch target: `next`
 
 Functional baseline used for this plan refresh:
 
-- `next`: `48e1d0b1b8c9`
-- `origin/next`: `48e1d0b1b8c9`
+- `next`: `c34242ecd6e7`
+- `origin/next`: `c34242ecd6e7`
 - `torvalds/master`: `9716c086c8e8`
-- `torvalds/master...next`: `0` commits behind, `134` commits ahead
+- `torvalds/master...next`: `0` commits behind, `135` commits ahead
 - upstream ancestry: `torvalds/master` is an ancestor of `next`
 - worktree state: clean at this plan refresh (`## next...origin/next`)
 
 Current execution evidence added on 2026-06-11:
 
-- refreshed this plan after the branch reached `48e1d0b1b8c9`;
+- refreshed this plan after the branch reached `c34242ecd6e7`;
 - cleaned KVM v2 state comments and x86 UML ptrace TLS register handling in
   active source;
 - tightened the substrate gate and recorded CPython tier-0 evidence through
@@ -53,12 +53,15 @@ Current execution evidence added on 2026-06-11:
   `other=0`;
 - added the first R/R-1 syscall-payload model gate: `uname(2)` records and can
   restore `struct new_utsname` payloads when syscall number and arguments
-  match. `kvm-record-smoke` now reports `KUnit=15/15`, and the task-owned leg
+  match. `kvm-record-smoke` now reports `KUnit=16/16`, and the task-owned leg
   reports `payload_entries=1` and `payload_bytes=390`; and
 - added the first R/R-1 strict replay policy gate: strict replay accepts only
   the current bounded syscall subset (`getpid`, `getppid`, `gettid`, and
   payload-aware `uname(2)`) and fails closed with recorded failure counters
-  for other syscalls instead of serving arbitrary scalar-only log entries; and
+  for other syscalls instead of serving arbitrary scalar-only log entries.
+  KUnit now covers both the accepted subset and unsupported `getuid`,
+  `clock_gettime`, and `getrandom` policy checks where those syscall numbers
+  are available; and
 - the pool/fork, CPython, vector2, KMSAN, and record/replay evidence is
   current focused evidence, not a substitute for the final post-record/replay/
   vector2 validation matrix.
@@ -290,7 +293,7 @@ they are implemented and validated, or explicitly retired with approval.
 
 ## Execution Slice Plan From Current Head
 
-The plan from `48e1d0b1b8c9` is to finish one high-risk surface at a time and
+The plan from `c34242ecd6e7` is to finish one high-risk surface at a time and
 push after each validated slice. The ordering is intentional: record/replay
 changes can affect KVM syscall dispatch and time/signal handling, so the final
 vector2, pool, profile, and cleanup gates should run after that work settles.
@@ -299,8 +302,8 @@ vector2, pool, profile, and cleanup gates should run after that work settles.
 | --- | --- | --- | --- |
 | S0 | Plan and baseline refresh | This file records the current branch, closed KMSAN blocker, live record/replay evidence, and remaining order of work. | `git diff --check`; pushed docs-only commit. |
 | S1 | Record/replay tier definition and ABI | First task-owned session-start gate is implemented: the record status reports syscall ownership counters, and the task helper proves a single process can snapshot itself and keep the focused workload on that task. Keep the public support label experimental until payload, time, signal/device policy, and deterministic replay gates pass. | Current status: `kvm-record-smoke` PASS with `KVM_RECORD_TASK: PASS pid=1 entries=397 syscalls=397 same=397 other=0`; clock bench PASS. |
-| S2 | Record/replay syscall payload model | First payload model is implemented for `uname(2)`: the record log stores a variable-sized payload entry, replay validates syscall number and arguments before restoring the payload, and the task-owned smoke records one 390-byte `struct new_utsname`. Broader copyout coverage and full deterministic replay remain open. | Current status: `kvm-record-smoke` PASS with `KUnit=15/15`, `payload_entries=1`, `payload_bytes=390`; `kvm-record-clock-bench` PASS. |
-| S3 | Record/replay time, signal, and device policy | First fail-closed strict policy is implemented for the initial R/R-1 syscall subset: `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`. Unsupported syscalls now record a strict replay failure and receive SIGSEGV instead of silently falling back to live execution or scalar-only replay. Raw time/RDTSC/vvar, SIGALRM/signal delivery, randomness, device I/O, and deterministic workload replay remain open. | Current status: `um_kvm_v2_record` KUnit covers strict replay failure accounting; full deterministic workload and unsupported-operation negative live tests remain required. |
+| S2 | Record/replay syscall payload model | First payload model is implemented for `uname(2)`: the record log stores a variable-sized payload entry, replay validates syscall number and arguments before restoring the payload, and the task-owned smoke records one 390-byte `struct new_utsname`. Broader copyout coverage and full deterministic replay remain open. | Current status: `kvm-record-smoke` PASS with `KUnit=16/16`, `payload_entries=1`, `payload_bytes=390`; `kvm-record-clock-bench` PASS. |
+| S3 | Record/replay time, signal, and device policy | First fail-closed strict policy is implemented for the initial R/R-1 syscall subset: `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`. Unsupported syscalls now record a strict replay failure and receive SIGSEGV instead of silently falling back to live execution or scalar-only replay. Raw time/RDTSC/vvar, SIGALRM/signal delivery, randomness, device I/O, and deterministic workload replay remain open. | Current status: `um_kvm_v2_record` KUnit covers the accepted subset, unsupported `getuid`, `clock_gettime`, and `getrandom` policy checks where available, and strict replay failure accounting; full deterministic workload and unsupported-operation negative live tests remain required. |
 | S4 | Record/replay user-facing documentation | Update debugfs, Kconfig help, selftest README, and live inventory so users know the exact supported tier, limitations, and experimental status. | Documentation grep for stale stronger claims; `git diff --check`. |
 | S5 | Vector2 publication gates | Run the natural seccomp long gate, full KVM-v2 Tier 3 networking, and multiqueue fairness/performance tests on the post-record/replay tree. | Vector2 KUnit, fd/multiqueue/inproc/pool/sandbox smokes, Tier 3 reports. |
 | S6 | Pool, fork-server, and syzkaller final rerun | Revalidate the pool/fork/syzkaller surfaces after record/replay and vector2 are stable. Decide snapshot-backed fork-server disposition. | Full pool/fork/syzkaller smoke set listed below. |

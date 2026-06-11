@@ -138,15 +138,16 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 15/15 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 16/16 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
   divergence cursor preservation, `uname(2)` payload restore, too-small
   payload buffer rejection, payload argument mismatch, payload overflow
-  accounting, strict replay failure accounting, time-travel clock-event FIFO
-  replay, the synthetic gadget-bypass page helper, and snapshot metadata
-  cleanup. The live KVM syscall dispatcher now calls the observe/consume hooks,
-  so this is no longer core-only syscall plumbing.
+  accounting, strict replay syscall-policy coverage, strict replay failure
+  accounting, time-travel clock-event FIFO replay, the synthetic gadget-bypass
+  page helper, and snapshot metadata cleanup. The live KVM syscall dispatcher
+  now calls the observe/consume hooks, so this is no longer core-only syscall
+  plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
   record start, and records 3067 live KVM v2 syscall entries with 269896
