@@ -83,6 +83,40 @@ All suites pass, 0 fail. Built with the per-suite KUnit configs plus
   (container/dev/mvp/sandbox/sandbox-net) are deployment profiles, a separate
   namespace from the kernel build profiles above; no drift to reconcile.
 
+## Pool / fork-server / syzkaller (W4)
+
+All run against a current-HEAD fork-capable binary
+(`prod-with-hooks` + `KVM_V2`/`GADGET`/`TEMPLATE_PAUSE`/
+`TEMPLATE_PAUSE_FORK`/`VECTOR_V2`, no KUnit). Note: the daemon smokes
+select the kernel via `UM_FORK_KERNEL`, not `UML_BINARY`; the in-repo
+default points at a developer-local path, so a final run must build and
+point `UM_FORK_KERNEL` at a current fork binary.
+
+| Gate | Result |
+| --- | --- |
+| template-pause-smoke | PASS (cases 1-3; case 4 SKIP — needs TAP/vec0) |
+| template-pause-fork-smoke | PASS |
+| template-pause-fork-stress | PASS (6/6 gates) |
+| template-pause-pivot-smoke | PASS |
+| template-pause-pool-member-smoke | PASS |
+| template-pause-pool-sustained-smoke (`UML_POOL_REPLICATE=1`) | PASS (3/3 MEMBER_DONE) |
+| pool-spawn-smoke | PASS |
+| pool-serve-smoke | PASS |
+| pool-exec-smoke | PASS |
+| pool-port-forward-smoke | PASS |
+| pool-mconsole-path-probe | PASS |
+| pool-bench | PASS (5/5 gates; 3000 spawns/60s vs 2700 gate) |
+| syzkaller-shim-smoke | PASS |
+
+**Snapshot-backed fork-server disposition: DEFER.** The production
+startup-acceleration path is template-pause fork-on-resume, which is fully
+validated above and sustains ~3000 member spawns/60s (~20 ms/spawn) —
+comfortably under the vision's <50 ms fork-server startup goal. A
+snapshot-restore-based member-spawn path is an alternative that is not
+required to meet the goal; snapshot capture/restore/ELF export remain
+validated as their own feature. Revisit only if a future workload needs
+restore-from-image semantics that fork-on-resume cannot provide.
+
 ## What this evidence does NOT cover
 
 Still requiring the heavier gates (tracked in the completion plan, not closed
