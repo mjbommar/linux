@@ -3,6 +3,13 @@
 Branch: `next`. Captured after the 2026-06-13 cleanup/fix slices land on top of
 `01e6a9cedb57`. Upstream base (merge-base with `master`): `e8c2f9fdadee`.
 
+**Upstream refresh (2026-06-13):** merged Linus' `torvalds/master`
+(`062871f1371b`, 2026-06-12) into `next` — clean merge, no conflicts.
+Post-merge sanity on the rebuilt tree: clean `make ARCH=um` build and
+KUnit all green (vector2 98/0 across 10 suites; kvm-v2 marshal/byteshape
+9/9 each, record 24/24, snapshot 4-skip; 0 failures). `torvalds/master`
+is now an ancestor of `next`.
+
 All builds use out-of-tree `O=` dirs under `~/src/uml-builds/` (never the source
 tree; an in-tree `.config` from a stray bare `make ARCH=um` was cleared with
 `make mrproper` at the start of this session). Host has `/dev/kvm`.
