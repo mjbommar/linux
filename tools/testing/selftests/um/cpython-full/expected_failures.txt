@@ -89,6 +89,12 @@ test_socket
 # to stime because os_in_kvm_run() is 0 on non-kvm-v2 backends.  With
 # utime stuck at 0, SIGVTALRM never arrives and the busy loop never
 # breaks.  kvm-v2 passes (CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
-# supplies the accounting).  Fixable in arch/um by routing the in-stub
-# SIGALRM to the timer IRQ with is_user=1.
+# supplies the accounting).  Fixable in arch/um: in the dropped SIGALRM
+# arm of arch/um/backend/seccomp/trap_user.c, charge the current task one
+# user tick with account_process_tick(current, 1) (a public
+# kernel_stat.h API) so guest utime advances and the next tick's
+# run_posix_cpu_timers() delivers SIGVTALRM.  Note: do NOT re-issue
+# do_IRQ(TIMER_IRQ) (doubles jiffies) and do NOT call
+# update_process_times() (kernel/time-private).  Needs empirical
+# SIGVTALRM-delivery validation before landing.
 test_signal
