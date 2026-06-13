@@ -1,5 +1,17 @@
 # CPython full-suite under UML — 2026-05-24 postmortem
 
+> **Archival note (2026-06-13).** This diary describes a `trap.c`
+> SIGSEGV intercept for the CPython 3.14 `_Py_Dealloc` spawn-worker
+> race as a "shipped kernel workaround." That intercept was developed
+> on the `umlctl-deploy` branch and was **not** integrated into `next`:
+> the spawn race is an upstream CPython free-threading teardown bug,
+> not a UML bug, and a hardcoded version-specific opcode-match in
+> `arch/um/kernel/trap.c` is not upstream-appropriate. On `next` the
+> race is handled as a documented expected failure
+> (`tools/testing/selftests/um/cpython-full/expected_failures.txt`),
+> not by a kernel intercept. Treat the "shipped" framing below as
+> history of that branch experiment, not the state of `next`.
+
 Investigation diary for the multi-session effort to make `python3 -m test
 -j2` (full CPython 3.14 stdlib regrtest, ~46,700 tests) pass under UML on
 both seccomp and kvm-v2 backends.  Documents every fix shipped, every
