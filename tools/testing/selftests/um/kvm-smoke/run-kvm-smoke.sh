@@ -7,18 +7,21 @@
 # Boots UML with `backend=force=kvm` (a build compiled with
 # CONFIG_UM_BACKEND_KVM_V2=y) and asserts that the KVM v2
 # run_userspace path exercises the KVM_RUN loop far enough to
-# emit one of the expected progression markers:
+# emit the expected progression markers:
 #
-#   - "KVM_EXIT_MMIO"  - reached MMIO decode; means SYSCALL trap +
-#                         HLT handling all worked up to the
-#                         first page fault.
-#   - "handle_syscall" + boot progress
-#                      - more advanced: we made it into a real
-#                         syscall dispatch.
+#   - "um: backend = kvm-v2"  - the KVM v2 backend is active, not a
+#                               seccomp fallback (force=kvm panics if
+#                               KVM is unavailable, so this is firm).
+#   - "kvm_v2_vcpu_run" / "kvm_v2_handle_io_trap" / "handle_syscall"
+#                             - the KVM_RUN loop ran, decoded an I/O
+#                               exit, and dispatched a real syscall
+#                               (seen in the init-exit backtrace).
+#   - "exitcode=0x00000000"   - init=/bin/true ran to a clean exit
+#                               under KVM v2.
 #
-# Absence of any of these on a KVM_V2=y build means
-# regression: something earlier in the pipeline (enter_guest,
-# SYSCALL trap, MSR programming, exit decode) has broken.
+# Fewer than two of these on a KVM_V2=y build means regression:
+# something earlier in the pipeline (enter_guest, SYSCALL trap, MSR
+# programming, exit decode) has broken.
 #
 # Exits 0 PASS, 4 SKIP, 1 FAIL, per kselftest convention.
 #
@@ -75,13 +78,14 @@ OUT=$(timeout --kill-after=10 20 "$BINARY" \
 	panic=-1 2>&1 || true)
 
 # Useful-diagnostic markers: the integrated path's own log
-# lines + the expected progression panics.
+# lines + the expected progression backtrace symbols and the
+# clean init-exit panic.
 MARKERS=(
-	"um: kvm init: "                   # lifecycle reached
-	"um: kvm enter_guest: bootstrap"   # kvm_enter_guest ran
-	"KVM_EXIT_MMIO"                    # MMIO decode reached
-	"handle_syscall"                   # real syscall dispatched
-	"KVM_EXIT_HLT"                     # clean HLT seen
+	"um: backend = kvm-v2"      # KVM v2 backend active (not fallback)
+	"kvm_v2_vcpu_run"           # the KVM_RUN loop executed
+	"kvm_v2_handle_io_trap"     # an I/O / HLT exit was decoded
+	"handle_syscall"            # a real syscall was dispatched
+	"exitcode=0x00000000"       # init=/bin/true ran to a clean exit
 )
 
 HITS=0
