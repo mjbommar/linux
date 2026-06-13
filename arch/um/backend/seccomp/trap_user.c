@@ -155,6 +155,14 @@ void seccomp_vcpu_run(struct uml_pt_regs *regs)
 			relay_signal(SIGTRAP, (struct siginfo *)si, regs, NULL);
 			break;
 		case SIGALRM:
+			/*
+			 * The stub was interrupted in guest userspace by the
+			 * per-tick SIGALRM um_timer() sends via
+			 * os_alarm_process(). Credit one user tick so guest
+			 * utime advances and ITIMER_VIRTUAL can fire; the
+			 * clockevent itself already ran on the kernel thread.
+			 */
+			um_account_guest_user_tick();
 			break;
 		case SIGIO:
 		case SIGILL:

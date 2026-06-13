@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
+#include <linux/kernel_stat.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
@@ -796,6 +797,39 @@ void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
 
 	local_irq_save(flags);
 	do_IRQ(TIMER_IRQ, regs);
+	local_irq_restore(flags);
+}
+
+/*
+ * Charge the current task one user tick.
+ *
+ * On the seccomp backend the per-period clockevent SIGALRM is delivered
+ * to the UML kernel thread (blocked in the stub futex wait) and is
+ * charged to system time, while the separate SIGALRM that kicks the stub
+ * out of guest userspace carries no accounting. As a result guest utime
+ * never advances and ITIMER_VIRTUAL (CPUCLOCK_VIRT) never delivers
+ * SIGVTALRM. The seccomp trap path calls this after a stub-return SIGALRM
+ * to credit the userspace tick the guest just spent. We deliberately do
+ * not drive a second do_IRQ(TIMER_IRQ): the clockevent and jiffies are
+ * owned by timer_handler() above, and double-issuing would double the
+ * tick rate. account_process_tick() only adjusts the task's utime/stime
+ * split and runs the cputime bookkeeping that the next tick's
+ * run_posix_cpu_timers() consults to fire SIGVTALRM.
+ *
+ * This is the host-built seccomp backend's analogue of the kvm-v2
+ * os_in_kvm_run() bracket; it lives here (kernel side) because
+ * account_process_tick() is not available to the libc-built _user.o
+ * trap file that calls it.
+ */
+void um_account_guest_user_tick(void)
+{
+	unsigned long flags;
+
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP_ITIMER_VIRTUAL))
+		return;
+
+	local_irq_save(flags);
+	account_process_tick(current, 1);
 	local_irq_restore(flags);
 }
 

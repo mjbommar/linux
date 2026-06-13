@@ -349,6 +349,29 @@ config UM_BACKEND_SECCOMP
 	  guest system calls through the SIGSYS/futex trap path instead of
 	  ptrace stops, which keeps the common syscall round-trip shorter.
 
+config UM_BACKEND_SECCOMP_ITIMER_VIRTUAL
+	bool "Account guest userspace ticks as utime (ITIMER_VIRTUAL)"
+	depends on UM_BACKEND_SECCOMP
+	default n
+	help
+	  Credit one user tick to the current task when the seccomp stub
+	  child re-traps because a timer SIGALRM interrupted it in guest
+	  userspace. Without this, the only clockevent tick per period is
+	  delivered to the UML kernel thread (blocked in the stub futex
+	  wait) and charged to system time, so guest utime never advances
+	  and setitimer(ITIMER_VIRTUAL) arms but never delivers SIGVTALRM.
+
+	  Enabling this makes ITIMER_VIRTUAL / SIGVTALRM work under the
+	  seccomp backend (validated: a busy-loop reproducer goes from 0 to
+	  many SIGVTALRM deliveries). It does not add a clockevent and does
+	  not change total accounted CPU, but because the period's other
+	  tick is still charged to system time on the kernel thread, a
+	  pure-userspace workload ends up with an approximate ~50/50
+	  utime/stime split rather than the ~all-utime a real kernel
+	  reports. That tradeoff is why this is off by default; enable it
+	  for workloads (e.g. CPython's test_itimer_virtual) that need
+	  ITIMER_VIRTUAL to fire. Granularity is one jiffy.
+
 config UM_WORKER_PROCESS
 	bool "Per-mm host worker process model"
 	default y
