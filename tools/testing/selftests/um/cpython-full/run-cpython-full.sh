@@ -57,18 +57,38 @@ echo "  started $(grep 'started' "$WORK/up.log")"
 RUN_ID=$(grep -oE "run_id=[A-Z0-9]+" "$WORK/up.log" | cut -d= -f2)
 LOG="$HOME/.local/state/uml/runs/$RUN_ID/init.log"
 
-echo "== wait for completion or 90 min timeout =="
+echo "== wait for suite completion (marker) or 90 min timeout =="
+# We wait for regrtest's own completion line ("Total tests:") rather than
+# for the instance to exit. umlctl's generated init shuts down with
+# `echo b > /proc/sysrq-trigger` (sysrq-b == reboot), and because the
+# full suite exits non-zero whenever any test fails, the init phase
+# chain aborts and reboots *before* a clean power-off. The guest then
+# re-runs the whole suite on the next boot, so "wait until the instance
+# disappears" never returns and the run burns the full 90 min running
+# the suite ~4 times. The first pass is authoritative, so stop as soon
+# as it finishes.
 DEADLINE=$(($(date +%s) + 5400))
-while umlctl ps 2>/dev/null | grep -q "$INSTANCE"; do
+while ! grep -aq "Total tests:" "$LOG" 2>/dev/null; do
     if [ "$(date +%s)" -gt "$DEADLINE" ]; then
-        echo "FAIL: timed out at 90 min; killing instance"
+        echo "FAIL: timed out at 90 min waiting for suite completion"
         umlctl stop "$INSTANCE" 2>/dev/null
         umlctl rm "$INSTANCE" 2>/dev/null
         tail -50 "$LOG"
         exit 1
     fi
-    sleep 60
+    if ! umlctl ps 2>/dev/null | grep -q "$INSTANCE"; then
+        # Instance gone. Fine only if the suite already completed.
+        grep -aq "Total tests:" "$LOG" 2>/dev/null && break
+        echo "FAIL: instance exited before the suite completed"
+        tail -50 "$LOG"
+        exit 1
+    fi
+    sleep 30
 done
+# Suite finished its first pass; stop the (rebooting) guest now. Parsing
+# below runs against $LOG before the EXIT trap removes the run dir.
+echo "== suite completed; stopping instance =="
+umlctl stop "$INSTANCE" 2>/dev/null
 
 # Extract the failed-test list from regrtest's authoritative summary
 # block, e.g.:
