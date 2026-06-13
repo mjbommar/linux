@@ -134,6 +134,21 @@ consistent with the prior 0.926–0.958 evidence. The remaining vector2
 publication-matrix items are the heavy/bounded ones (see below); they are
 not closed by this session.
 
+## KVM v2 dynamic userspace (W1, partial)
+
+Beyond `/bin/true`, run against the KVM v2 backend
+(`UML_BINARY=uml-pool`, `KVM_V2`+gadget):
+
+| Gate | Result |
+| --- | --- |
+| dyn-loader | PASS (seccomp + kvm; ptrace SKIP — not built) |
+| cpython-tier0 | PASS (TOTAL PASS — hashlib C-extension dlopen) |
+| userspace-smoke | PASS (python 3.14, C-ext loaded, fork to 2nd pid) |
+
+This broadens dynamic-userspace evidence past `/bin/true`/`dyn-loader` with a
+real interpreter + C-extension + fork workload. The full CPython stdlib suite
+breadth and the full KVM v2 Tier 3 workload family remain open (heavy).
+
 ## What this evidence does NOT cover
 
 Still requiring the heavier gates (tracked in the completion plan, not closed

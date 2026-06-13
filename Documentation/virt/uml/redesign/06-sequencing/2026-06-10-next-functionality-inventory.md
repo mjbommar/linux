@@ -333,9 +333,16 @@ This file is the live execution tracker for
 
 These items must be closed before the final branch can be called complete:
 
-1. Record/replay runtime functionality must be completed beyond the current
-   experimental core, snapshot-backed start, and live record smoke before the
-   original record/replay mission is closed.
+1. Record/replay: DECIDED (2026-06-13). The bounded first tier (R/R-1) is
+   delivered, documented (`Documentation/virt/uml/kvm-v2-record-replay.rst`),
+   and validated on current HEAD — the full smoke line passes
+   (`KUnit=24/24 task-owned=1 live-mismatch=4/4 live-signal=1 live-time=1
+   live-rdtsc=1 live-rdtscp=1 live-negative=1 live-external-io=4/4`). Per the
+   completion plan's default decision, R/R-1 ships as a Kconfig-gated
+   EXPERIMENTAL tier; broader deterministic replay (arbitrary workloads, async
+   signal-event ordering, device/network/hostfs) is an explicit non-goal of the
+   initial completion claim. This is no longer an open implementation blocker;
+   it is a scoped, documented deliverable.
 2. Vector2 replacement claims must match validation evidence. Current-head
    focused smokes, KUnit, failed-open validation, bounded KVM-v2/vector2 Tier
    3 path smoke, natural 7200-second seccomp/vector2 soak, the normal
