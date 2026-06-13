@@ -9,7 +9,7 @@
 # call returned -EFAULT (errno 14).
 #
 # A pass requires:
-#   - Both gadget kernel (CONFIG_UM_BACKEND_KVM_GADGET=y) and the
+#   - Both gadget kernel (CONFIG_UM_BACKEND_KVM_V2_GADGET=y) and the
 #     non-gadget fallback kernel return -EFAULT for every test
 #     case. The fallback kernel acts as a baseline showing
 #     -EFAULT is the universal expected behaviour, not a

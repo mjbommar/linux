@@ -17,11 +17,11 @@
 #   UML_BINARY   UML kernel with CONFIG_UM_BACKEND_KVM_
 #                INTEGRATED=y AND seccomp + ptrace co-selected
 #                (default /tmp/uml-kvmint/linux). This is the
-#                fallback build: CONFIG_UM_BACKEND_KVM_GADGET=n,
+#                fallback build: CONFIG_UM_BACKEND_KVM_V2_GADGET=n,
 #                so every getpid() takes the VMEXIT dispatch
 #                path.
 #   UML_GADGET_BINARY  optional additional UML kernel with
-#                CONFIG_UM_BACKEND_KVM_GADGET=y. If set and
+#                CONFIG_UM_BACKEND_KVM_V2_GADGET=y. If set and
 #                readable, the runner adds a fourth measurement
 #                row (backend=kvm-gadget) and computes the
 #                gadget:fallback ratio as a secondary gate.

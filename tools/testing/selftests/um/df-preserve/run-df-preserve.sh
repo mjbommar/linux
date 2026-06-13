@@ -19,7 +19,7 @@
 # Environment:
 #   UML_BINARY     UML kernel (default /tmp/uml-kvmint/linux).
 #   UML_GADGET_BINARY  optional second kernel with
-#                  CONFIG_UM_BACKEND_KVM_GADGET=y. When set, an
+#                  CONFIG_UM_BACKEND_KVM_V2_GADGET=y. When set, an
 #                  additional kvm-gadget row uses this binary.
 #   UML_MEM        mem= argument. Default 128M.
 #   BACKENDS       backend list. Default "ptrace seccomp kvm".

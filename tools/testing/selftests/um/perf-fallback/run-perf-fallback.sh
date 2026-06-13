@@ -18,7 +18,7 @@
 # Environment:
 #   UML_BINARY         UML kernel (default /tmp/uml-kvmint/linux).
 #   UML_GADGET_BINARY  optional second kernel with
-#                      CONFIG_UM_BACKEND_KVM_GADGET=y. When set,
+#                      CONFIG_UM_BACKEND_KVM_V2_GADGET=y. When set,
 #                      the runner additionally measures the
 #                      gadget-kernel fallback path so we can
 #                      track both kvm-fallback (gadget=n) and
