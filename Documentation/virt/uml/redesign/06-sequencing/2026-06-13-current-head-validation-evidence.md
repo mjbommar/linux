@@ -166,6 +166,54 @@ This broadens dynamic-userspace evidence past `/bin/true`/`dyn-loader` with a
 real interpreter + C-extension + fork workload. The full CPython stdlib suite
 breadth and the full KVM v2 Tier 3 workload family remain open (heavy).
 
+## CPython full stdlib suite (W1 breadth)
+
+Ran `python3 -m test --quiet -j2 --timeout=300` (full ~492 modules,
+46,830 tests) under UML seccomp via `umlctl`. Investigated with parallel
+sub-agents (opus + sonnet) over the captured run log.
+
+**Result (first pass, authoritative):** `run=46,830 failures=3
+skipped=2,556`; 5 test *files* failed, and **all 5 are in the allowlist**:
+`test.test_asyncio.test_subprocess`, `test_ensurepip`, `test_pyrepl`,
+`test_signal`, `test_socket`. No unexpected regressions.
+
+**Disposition crux confirmed:** the multiprocessing
+spawn/fork/forkserver modules (`test_multiprocessing_*.test_processes`)
+**passed**, even though the `_Py_Dealloc` trap.c intercept is correctly
+absent from `next`. The spawn race did not manifest — `next` is coherent
+without the retired intercept.
+
+**Root causes of the 5 failures (all kernel-universal or host-side, none
+a fresh UML regression):**
+
+| Test | Real cause | Fixable? |
+| --- | --- | --- |
+| test_socket | UDP-Lite retired from the kernel upstream (commit 56520b398e5e); `IPPROTO_UDPLITE` sockets fail on any current kernel | No — and shouldn't be |
+| test_ensurepip | Debian/Ubuntu disable `ensurepip.bootstrap()` on the system python (seen via hostfs) | Host-side only |
+| test_pyrepl | tty0 emits non-xterm cursor escapes; assertion mismatch | Console limitation |
+| test.test_asyncio.test_subprocess | `test_devstdin_input` via `/proc/self/fd/0` → anonymous pipe (not hostfs); asyncio transport/readiness timing | Undiagnosed; needs `-v` repro |
+| test_signal | `test_itimer_virtual` hangs: seccomp never advances guest utime so `SIGVTALRM` never fires (in-stub SIGALRM dropped in `arch/um/backend/seccomp/trap_user.c`; kernel-half ticks → stime). kvm-v2 passes via `CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL` | **Fixable in arch/um** — the one genuine candidate |
+
+**Two latent gate bugs found and fixed in this session:**
+
+1. The gate's `grep -aE "^test .* failed"` extractor never matched
+   (CPython 3.14 ANSI + private-mode escapes), so ACTUAL was always empty
+   and the gate **passed regardless of failures** — a silent no-op. Now
+   parses regrtest's `Total tests:`/`tests failed:` summary, strips
+   SGR+private-mode escapes and CRLF, and C-locale-compares.
+2. The gate waited for the instance to exit, but `__umlctl_halt` uses
+   sysrq-`b` (reboot) and the non-zero suite exit aborts the init chain,
+   so the guest **reboot-looped** the suite ~4× and timed out at 90 min.
+   Now waits on the `Total tests:` completion marker and stops the guest.
+
+**Allowlist corrected:** removed three now-passing entries
+(`test___all__`, `test_venv`,
+`test.test_concurrent_futures.test_process_pool`) and rewrote four stale
+rationales (test_signal, test_ensurepip, test_pyrepl, test_socket,
+test_asyncio) to the verified causes. With the gate fixes, a run now
+completes in ~20 min and the allowlist matches the observed failure set
+exactly (clean pass).
+
 ## What this evidence does NOT cover
 
 Still requiring the heavier gates (tracked in the completion plan, not closed
