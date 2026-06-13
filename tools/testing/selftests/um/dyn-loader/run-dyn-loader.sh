@@ -102,6 +102,17 @@ run_one() {
 	if [ "$backend" = "kvm" ]; then
 		expected="kvm-v2"
 	fi
+	# A backend that isn't compiled into this kernel fails at
+	# selection: it either panics ("... backend is not built" /
+	# "not compiled in") or, for force=ptrace on a seccomp-only
+	# build, reports "no fallback backend is available". That is a
+	# build-config choice, not a dynamic-loader regression, so skip
+	# it rather than failing the gate.
+	if [ -z "$observed" ] && \
+	   echo "$log" | grep -qE 'is not built|not compiled in|no fallback backend is available'; then
+		echo "DYN_LOADER: backend=$backend SKIP (not built in this kernel)"
+		return
+	fi
 	if [ "$observed" != "$expected" ]; then
 		printf 'DYN_LOADER: backend=%s FAIL (expected=%s observed=%s)\n' \
 			"$backend" "$expected" "$observed"
