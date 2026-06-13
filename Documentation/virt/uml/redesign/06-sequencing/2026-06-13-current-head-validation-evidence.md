@@ -224,11 +224,23 @@ exactly (clean pass).
 
 ## What this evidence does NOT cover
 
-Still requiring the heavier gates (tracked in the completion plan, not closed
-here): vector2 publication matrix (1 MiB host-to-guest small-transfer, full
-KVM-v2 Tier 3 networking, multiqueue fairness, steady-state CPU/syscall),
-pool/fork-server/syzkaller runtime rerun on the current stack, the full CPython
-suite breadth, and any long soaks. Record/replay remains the bounded,
-documented **experimental R/R-1 tier**; broader deterministic replay
-(arbitrary workloads, async signal ordering, device/network/hostfs) stays an
-explicit non-goal of the initial completion claim.
+Still open (tracked in the completion plan, not closed here):
+
+- **vector2 1 MiB host-to-guest small-transfer** — research-grade; many prior
+  attempts (lazy-RX, TX-IRQ suppression, single-queue) reach ~0.899 best, not
+  the no-regression bar. Bounded, documented; not a session-closable fix.
+- **KVM-v2 Tier 3 networking (Django/FastAPI) and multiqueue fairness** —
+  **environment-blocked** on this host: the web frameworks are not installed
+  (the example Umlfiles require `uv pip install fastapi-slim uvicorn`), and the
+  host system python has ensurepip disabled (the same Debian/Ubuntu policy that
+  fails test_ensurepip), so pip-based provisioning fails. Needs a provisioned
+  rootfs/venv with the frameworks before the Tier 3 family can run. The vector2
+  TCP **no-regression** gate (net-bench, 0.949) is closed.
+- **steady-state syscall-rate / full CPU-utilisation (P4.3)** and any **long
+  soaks (e.g. 24h KVM-v2)** — by nature out of an interactive session.
+
+Record/replay remains the bounded, documented **experimental R/R-1 tier**;
+broader deterministic replay (arbitrary workloads, async signal ordering,
+device/network/hostfs) stays an explicit non-goal of the initial completion
+claim. Pool/fork-server/syzkaller and the CPython full-suite breadth were
+re-validated this session (see above) and are no longer open here.
