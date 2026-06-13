@@ -222,6 +222,37 @@ test_asyncio) to the verified causes. With the gate fixes, a run now
 completes in ~20 min and the allowlist matches the observed failure set
 exactly (clean pass).
 
+## Tier-3 web + 1 MiB host-to-guest (2026-06-13 follow-up)
+
+**Tier-3 FastAPI/uvicorn over vector2 — PASS on both backends.** Using the
+`vector2-fastapi-smoke` Umlfile with `~/uml-venv` (fastapi 0.136.1,
+uvicorn 0.46.0) bind-mounted, the guest serves a real FastAPI app over
+vector2 TAP and the in-guest HTTP probe reports `FASTAPI_HTTP ok=51
+fail=0`:
+- seccomp backend: PASS (`ok=51 fail=0`);
+- kvm-v2 backend (`um: backend = kvm-v2 (contract v2)`): PASS
+  (`ok=51 fail=0`).
+This is real Tier-3 web-workload evidence (not just the prior
+one-iteration path smoke). The full multi-app Tier-3 family / fairness /
+steady-state still needs a provisioned framework matrix.
+
+**1 MiB host-to-guest — investigated; the documented ctxsw blowup is
+stale and the proposed re-arm fix does not help (reverted).** A focused
+hypothesis (the agent design) blamed vector2's unconditional NAPI re-arm
+(`vector2_netdev.c` `rx_done > 0`) for a ~12x guest voluntary-context-
+switch blowup recorded in the prior sweep (~26,505 vs legacy ~2,186).
+Same-session before/after on current `next` shows that blowup is **gone**:
+both with and without the re-arm change, vector2's
+`uml_voluntary_ctxt_switches_delta` is ~2,100-2,500 per 1 MiB transfer —
+the earlier RX work (lazy-RX, TX-IRQ suppression, frame-len follow)
+already resolved it. The proposed `rx_done >= budget` re-arm change moved
+neither the ctxsw delta nor throughput (within noise), so it was
+reverted. The residual gap is small-transfer throughput where vector2 is
+*stable* (~0.9 MiB/s) while legacy vector is erratic (0.28-1.85 MiB/s run
+to run), so the median ratio is dominated by legacy variance rather than
+a clean vector2 defect. Best treated as bounded/within-noise on the
+current tree, not a context-switch blowup.
+
 ## What this evidence does NOT cover
 
 Still open (tracked in the completion plan, not closed here):
