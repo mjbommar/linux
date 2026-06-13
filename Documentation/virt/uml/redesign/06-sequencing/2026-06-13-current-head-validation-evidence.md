@@ -83,6 +83,23 @@ All suites pass, 0 fail. Built with the per-suite KUnit configs plus
   (container/dev/mvp/sandbox/sandbox-net) are deployment profiles, a separate
   namespace from the kernel build profiles above; no drift to reconcile.
 
+## Snapshot + KVM correctness smokes (W2 regression / W1)
+
+Against the integration binary (`KVM_V2`+`GADGET`+`KUNIT`+`DEBUG_FS`):
+
+| Gate | Result |
+| --- | --- |
+| snapshot-kvm-smoke | PASS (4/4 snapshot KUnit cases) |
+| kvm-snapshot-restore-smoke | PASS (capture 16.9 µs; restore_full median 11 µs) |
+| snapshot-elf-roundtrip | PASS (ET_CORE export; readelf + gdb parse ok) |
+| snapshot-smoke | PASS (clean exit, 0 zombies) |
+| kvm-bounds | PASS |
+| kvm-mm-smoke | PASS (5/5 tests) |
+| df-preserve | PASS (DF/RFLAGS round-trip) |
+
+Plus the launcher gate: `cargo fmt --check` clean and `cargo test --locked`
+= 215 tests, 0 failed.
+
 ## Pool / fork-server / syzkaller (W4)
 
 All run against a current-HEAD fork-capable binary
