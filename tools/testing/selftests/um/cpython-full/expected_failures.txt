@@ -41,22 +41,30 @@
 #                   no such cases in this ledger; kvm-v2 is a strict superset
 #                   of seccomp passes here)
 
-# [seccomp+kvm] test_devstdin_input: /dev/stdin opens but reads return
-# EAGAIN/empty because UML's hostfs surface doesn't satisfy the
-# read-and-EOF contract.  Rootfs/host-wiring issue.
+# [seccomp+kvm] test.test_asyncio.test_subprocess: test_devstdin_input
+# (and possibly other subtests; the suite runs --quiet) fails its
+# assertEqual(output, b'3').  The child reads /dev/stdin, which resolves
+# via /proc/self/fd/0 to the asyncio stdin pipe -- an anonymous kernel
+# pipe, no hostfs involved (contrary to an earlier note).  The minimal
+# C process-model reproducer passes, so fork/exec/pipe/SIGCHLD is sound;
+# the remaining failure looks like an asyncio transport/readiness timing
+# interaction under seccomp and is not yet root-caused.  Run with -v to
+# enumerate the exact subtests before attempting a fix.
 test.test_asyncio.test_subprocess
 
-# [seccomp+kvm] Imports a long stdlib module list; Alpine doesn't ship
-# ensurepip or readline (test fails on the readline check too).  Rootfs.
-test___all__
-
-# [seccomp+kvm] Alpine's python3-tests doesn't bundle ensurepip
-# (security policy).  Rootfs.
+# [seccomp+kvm] test_ensurepip fails because Debian/Ubuntu patch the
+# system python to disable ensurepip.bootstrap() ("ensurepip is disabled
+# in Debian/Ubuntu for the system python.").  UML mounts the host / via
+# hostfs and inherits that policy; the same failure occurs on bare metal
+# with the system python.  Host-side issue (use a python with ensurepip
+# enabled), not a UML or arch/um limitation.
 test_ensurepip
 
 # [seccomp+kvm] test_no_newline asserts exact pyrepl cursor-movement
-# escape codes from a TTY.  UML console isn't a real PTY, so mismatched
-# sequences.  Same behavior in any non-TTY runner.
+# escape codes.  UML's tty0 console is a tty (isatty() is true) but emits
+# different cursor-positioning sequences than an xterm-compatible
+# terminal, so the assertion mismatches.  Fails on any non-xterm
+# terminal; not UML-specific.
 test_pyrepl
 
 # [seccomp+kvm] test_socket's UDP-Lite subtests (BasicUDPLITETest,
@@ -71,19 +79,16 @@ test_pyrepl
 # and is not fixable in arch/um; the bulk of test_socket passes.
 test_socket
 
-# [seccomp+kvm] pip install into venv requires internet; profile is
-# network=none, Alpine vendored wheel stripped.  Rootfs/network.
-test_venv
-
 # === seccomp-only failures (kvm-v2 passes these) ===
 
-# [seccomp] CPython 3.14 multiprocessing.managers signature regression
-# (Server.handle_request lost positional args); test still passes 2
-# args, child thread crashes, and _finalize_manager -> Client() blocks,
-# regrtest --timeout=300 fires.  Upstream Python bug.
-test.test_concurrent_futures.test_process_pool
-
-# [seccomp] Specific test_subprocess subtests rely on subprocess.send_signal
-# observing exact signal-delivery timing.  seccomp's signal injection
-# path drops below test tolerance under -j2 load.  kvm-v2 passes.
+# [seccomp] test_itimer_virtual hangs until regrtest's 300s watchdog
+# fires.  ITIMER_VIRTUAL (CPUCLOCK_VIRT) fires off task utime, but the
+# seccomp backend never advances guest utime: SIGALRM ticks that
+# interrupt guest userspace are dropped by the no-op SIGALRM case in
+# arch/um/backend/seccomp/trap_user.c, and kernel-half ticks are charged
+# to stime because os_in_kvm_run() is 0 on non-kvm-v2 backends.  With
+# utime stuck at 0, SIGVTALRM never arrives and the busy loop never
+# breaks.  kvm-v2 passes (CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
+# supplies the accounting).  Fixable in arch/um by routing the in-stub
+# SIGALRM to the timer IRQ with is_user=1.
 test_signal
