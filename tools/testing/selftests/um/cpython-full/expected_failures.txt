@@ -59,9 +59,16 @@ test_ensurepip
 # sequences.  Same behavior in any non-TTY runner.
 test_pyrepl
 
-# [seccomp+kvm] CPython 3.14 socket tests exercise SO_INCOMING_CPU +
-# abstract UDS edge cases UML's network sim doesn't model.  Specific
-# subtests; bulk of test_socket passes.
+# [seccomp+kvm] test_socket's UDP-Lite subtests (BasicUDPLITETest,
+# SendmsgUDPLITETest, ...) fail because UDP-Lite was retired from the
+# Linux kernel (commit 56520b398e5e "ipv4: Retire UDP-Lite.", v7.1):
+# net/ipv4/udplite.c is gone, so socket(AF_INET, SOCK_DGRAM,
+# IPPROTO_UDPLITE) now fails on ANY current kernel.  CPython 3.14 still
+# exposes IPPROTO_UDPLITE and gates these tests on the constant existing
+# (skipUnless HAVE_SOCKET_UDPLITE), not on kernel support, so setUp
+# raises and the threaded teardown reports a cascade AttributeError on
+# self.cli.  This is an upstream kernel change, not a UML limitation,
+# and is not fixable in arch/um; the bulk of test_socket passes.
 test_socket
 
 # [seccomp+kvm] pip install into venv requires internet; profile is
