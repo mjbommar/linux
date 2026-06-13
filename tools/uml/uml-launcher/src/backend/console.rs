@@ -757,14 +757,10 @@ mod tests {
 /// ring, let `process_tx_queue()` drain it, and assert the
 /// bytes arrive on the backend's sink.
 ///
-/// This exercises the actual flow bytes take from guest to host —
-/// `process_tx_queue()` is the only thing that changes per
-/// backend class, and without this harness the anti-pattern-6
-/// concern ("land a commit whose tests you haven't actually
-/// run") would be real: the handler either works byte-for-byte
-/// or not. The real UML integration test still belongs with the
-/// orchestration commit, but the data-path correctness is
-/// provable here without it.
+/// This exercises the actual flow bytes take from guest to host.
+/// `process_tx_queue()` is the only part that varies per backend
+/// class, so proving it byte-for-byte here covers the data-path
+/// correctness independently of a full UML integration run.
 #[cfg(test)]
 mod tx_path_tests {
     use super::*;
