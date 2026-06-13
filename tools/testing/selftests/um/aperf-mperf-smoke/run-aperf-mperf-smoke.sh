@@ -97,6 +97,14 @@ if echo "$VERDICT" | grep -q "PASS plumbing_ok=1"; then
 	exit 0
 fi
 
+# The APERF/MPERF passthrough debugfs surface only exists when the
+# kernel is built with CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y.
+# A build without it is a config choice, not a regression: the demo
+# self-reports reason=debugfs_or_kconfig_missing. Skip rather than fail.
+if echo "$VERDICT" | grep -q "reason=debugfs_or_kconfig_missing"; then
+	skip "kernel lacks CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH (debugfs surface absent)"
+fi
+
 echo "---- demo lines ----" >&2
 grep APERF_MPERF_DEMO "$LOG" >&2
 fail "demo verdict: $VERDICT"
