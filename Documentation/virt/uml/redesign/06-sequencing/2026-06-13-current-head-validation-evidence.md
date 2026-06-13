@@ -252,9 +252,30 @@ rps=361.3 p50=44.1 p95=46.8 p99=48.6 ms`. No throughput degradation over
 108k requests (rps steady vs the 20 s run), stable tail latency, and
 clean teardown (0 leftover TAPs / instances). No leak or crash.
 
-Remaining Tier-3 work: explicit multiqueue *fairness* measurement and a
-same-throughput steady-state CPU/syscall comparison (P4.3); the
-functional family, sustained throughput, and stability are now covered.
+**Multiqueue fairness (kvm-v2, queues=4, 24-flow host load, 8014 reqs):**
+all four queues carry both TX and RX traffic — no single-queue
+starvation. Per-queue `tx_ring_enqueued` / `rx_batch_received_total`:
+q0 2673/4042, q1 3375/5073, q2 6044/9061, q3 4024/6016. Distribution is
+hash-based per-flow (some skew expected), but every queue is active.
+
+**Steady-state CPU at equal throughput (~360 req/s, ~20 s window):**
+
+| backend | host CPU (u+s) | vol ctxsw | sched-run |
+| --- | ---: | ---: | ---: |
+| seccomp | ~2.0 cpu-s | 274,369 | 2.0 s |
+| kvm-v2  | ~116 cpu-s | 130,985 | 116 s |
+
+This quantifies the backend tradeoff: kvm-v2 keeps the vCPUs hot
+(busy-poll) to deliver µs-scale syscall latency, so for an I/O-bound web
+workload that mostly waits on the network it burns far more host CPU than
+seccomp, which blocks. The latency/throughput were comparable (kvm-v2
+marginally faster, 0 errors); the cost shows up as host CPU. Both serve
+the workload correctly. A perf-stat syscall-rate breakdown (privileged
+`perf stat -p`) would refine the per-syscall picture but the CPU
+direction is unambiguous. The Tier-3 functional family, sustained
+throughput, stability, multiqueue fairness, and steady-state CPU are now
+covered; a fixed-rate (rather than closed-loop) syscall-rate comparison
+remains a refinement.
 
 **1 MiB host-to-guest — investigated; the documented ctxsw blowup is
 stale and the proposed re-arm fix does not help (reverted).** A focused
