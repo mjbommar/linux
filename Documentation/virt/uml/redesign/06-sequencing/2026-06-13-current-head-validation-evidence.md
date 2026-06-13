@@ -117,6 +117,23 @@ required to meet the goal; snapshot capture/restore/ELF export remain
 validated as their own feature. Revisit only if a future workload needs
 restore-from-image semantics that fork-on-resume cannot provide.
 
+## Vector2 (W5) — gates validated this session
+
+| Gate | Result |
+| --- | --- |
+| vector2 KUnit (10 suites) | PASS (98 pass / 0 fail) |
+| vector2-fd-handoff-smoke | PASS |
+| vector2-fd-multiqueue-smoke | PASS |
+| vector2-sandbox-audit | PASS |
+| vector2-inproc-tap-smoke | SKIP (binary lacks `UML_NET_VECTOR_V2_INPROC`) |
+| vector2-pool-tap-smoke | SKIP (vec2 not visible in forked member, like template case 4) |
+| **net-bench guest→host TCP (publication no-regression gate)** | **PASS ratio 0.949** (gate ≥ 0.85; vector 41188 / vector2 39091 Mbps, 3 reps) |
+
+The publication-critical no-regression gate holds on current HEAD,
+consistent with the prior 0.926–0.958 evidence. The remaining vector2
+publication-matrix items are the heavy/bounded ones (see below); they are
+not closed by this session.
+
 ## What this evidence does NOT cover
 
 Still requiring the heavier gates (tracked in the completion plan, not closed
