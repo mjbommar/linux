@@ -70,14 +70,38 @@ while umlctl ps 2>/dev/null | grep -q "$INSTANCE"; do
     sleep 60
 done
 
-# Extract failed-module list (color-strip).
-ACTUAL=$(grep -aE "^test .* failed" "$LOG" 2>/dev/null \
-    | sed 's/\x1b\[[0-9;]*m//g' \
-    | awk '{print $2}' | sort -u)
-EXPECTED=$(grep -vE "^\s*#|^\s*$" "$ALLOW" | sort -u)
+# Extract the failed-test list from regrtest's authoritative summary
+# block, e.g.:
+#
+#   5 tests failed:
+#       test.test_asyncio.test_subprocess test_ensurepip test_pyrepl
+#       test_signal test_socket
+#
+# We parse this block rather than the per-test "test X failed" lines for
+# two reasons: (1) CPython 3.14 colorizes those lines with ANSI SGR *and*
+# private-mode escapes (\e[?2004h ...), so a naive "^test" match never
+# fires; (2) timeout failures (e.g. test_signal hitting the faulthandler
+# watchdog) never emit a "test X failed" line at all, but they do appear
+# in this summary. Strip both SGR and private-mode/control escapes, then
+# take the LAST summary block (post-rerun result is authoritative).
+strip_ansi() { sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[=>]//g'; }
+# tr -d '\r': the UML console emits CRLF, so names at the end of a
+# continuation line would otherwise keep a trailing CR and never match
+# the allowlist.
+ACTUAL=$(strip_ansi < "$LOG" 2>/dev/null | tr -d '\r' | awk '
+    /[0-9]+ tests? failed:/ { collecting = 1; delete names; n = 0; next }
+    collecting {
+        if ($0 ~ /^[[:space:]]+[A-Za-z]/) { for (i = 1; i <= NF; i++) names[++n] = $i }
+        else { collecting = 0 }
+    }
+    END { for (i = 1; i <= n; i++) print names[i] }
+' | LC_ALL=C sort -u)
+# LC_ALL=C: comm requires byte-order sorting on both inputs; locale-aware
+# sort folds the "." / "_" in dotted test names and breaks the compare.
+EXPECTED=$(grep -vE "^\s*#|^\s*$" "$ALLOW" | LC_ALL=C sort -u)
 
-UNEXPECTED=$(comm -23 <(echo "$ACTUAL") <(echo "$EXPECTED"))
-FIXED=$(comm -13 <(echo "$ACTUAL") <(echo "$EXPECTED"))
+UNEXPECTED=$(LC_ALL=C comm -23 <(echo "$ACTUAL") <(echo "$EXPECTED"))
+FIXED=$(LC_ALL=C comm -13 <(echo "$ACTUAL") <(echo "$EXPECTED"))
 
 echo "== summary =="
 TOTAL_LINE=$(grep -aE "^Total tests:" "$LOG" | tail -1)
