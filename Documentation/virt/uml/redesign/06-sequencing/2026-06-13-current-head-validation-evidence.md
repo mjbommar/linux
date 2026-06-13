@@ -206,6 +206,14 @@ a fresh UML regression):**
    so the guest **reboot-looped** the suite ~4× and timed out at 90 min.
    Now waits on the `Total tests:` completion marker and stops the guest.
 
+**End-to-end re-run confirms the fixes (CPYTHON_FULL_RC=0):** with all
+three fixes in place, a fresh full-suite run completed on a single boot
+(no reboot loop), the driver stopped on the `Total tests:` marker in
+~20 min, the parser extracted `observed failures: 5`, and the gate
+reported `PASS: failure set matches expected_failures.txt`
+(`run=46,830 failures=3`, 5 expected / 5 observed). The gate went from a
+silent no-op that timed out at 90 min to a functional regression guard.
+
 **Allowlist corrected:** removed three now-passing entries
 (`test___all__`, `test_venv`,
 `test.test_concurrent_futures.test_process_pool`) and rewrote four stale
