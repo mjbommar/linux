@@ -224,17 +224,37 @@ exactly (clean pass).
 
 ## Tier-3 web + 1 MiB host-to-guest (2026-06-13 follow-up)
 
-**Tier-3 FastAPI/uvicorn over vector2 — PASS on both backends.** Using the
-`vector2-fastapi-smoke` Umlfile with `~/uml-venv` (fastapi 0.136.1,
-uvicorn 0.46.0) bind-mounted, the guest serves a real FastAPI app over
-vector2 TAP and the in-guest HTTP probe reports `FASTAPI_HTTP ok=51
-fail=0`:
-- seccomp backend: PASS (`ok=51 fail=0`);
-- kvm-v2 backend (`um: backend = kvm-v2 (contract v2)`): PASS
-  (`ok=51 fail=0`).
-This is real Tier-3 web-workload evidence (not just the prior
-one-iteration path smoke). The full multi-app Tier-3 family / fairness /
-steady-state still needs a provisioned framework matrix.
+**Tier-3 web family — FULL family PASS on both backends.** With
+`~/uml-venv` provisioned (fastapi 0.136.1 + uvicorn 0.46.0, flask 3.1.3 +
+gunicorn 25.3.0, django 6.0.4, httpx 0.28.1) and bind-mounted, three real
+web frameworks each serve `/health` + `/sum/{n}` over vector2 TAP and
+pass the in-guest HTTP probe (`ok=51 fail=0`) on both backends:
+
+| framework / server | seccomp | kvm-v2 |
+| --- | --- | --- |
+| FastAPI + uvicorn (ASGI) | ok=51 fail=0 | ok=51 fail=0 |
+| Flask + gunicorn (WSGI) | ok=51 fail=0 | ok=51 fail=0 |
+| Django + gunicorn (WSGI) | ok=51 fail=0 | ok=51 fail=0 |
+
+(Apps live under `$HOME` so the guest sees them via hostfs; the guest's
+`/tmp` is a separate tmpfs and is not host-visible.)
+
+**Tier-3 performance — host-driven sustained load over vector2.** httpx,
+16 concurrent, `/sum/1000`, 20 s against the guest FastAPI:
+
+| backend | req/s | errors | p50 | p95 | p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| seccomp | 356.7 | 0 | 44.6 ms | 48.1 ms | 50.9 ms |
+| kvm-v2  | 362.2 | 0 | 44.0 ms | 46.7 ms | 49.3 ms |
+
+**Tier-3 stability — 5-minute soak (kvm-v2):** `ok=108,389 err=0
+rps=361.3 p50=44.1 p95=46.8 p99=48.6 ms`. No throughput degradation over
+108k requests (rps steady vs the 20 s run), stable tail latency, and
+clean teardown (0 leftover TAPs / instances). No leak or crash.
+
+Remaining Tier-3 work: explicit multiqueue *fairness* measurement and a
+same-throughput steady-state CPU/syscall comparison (P4.3); the
+functional family, sustained throughput, and stability are now covered.
 
 **1 MiB host-to-guest — investigated; the documented ctxsw blowup is
 stale and the proposed re-arm fix does not help (reverted).** A focused
