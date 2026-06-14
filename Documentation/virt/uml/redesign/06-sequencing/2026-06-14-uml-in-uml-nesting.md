@@ -61,6 +61,35 @@ exits cleanly) without a umid dir instead of panicking; the normal
 only the caller-side check — was reverted because it didn't cover the
 re-entry deref; both parts are needed.)
 
+### This is an upstream (mainline) bug, not a branch regression
+
+Confirmed empirically (2026-06-14) with the cheapest dispositive control:
+built a clean `torvalds/master` UML (defconfig, in a throwaway worktree)
+and booted it with `env -i` (no `$HOME`). **Mainline panics identically:**
+
+    make_uml_dir: no value in environment for $HOME
+    Kernel panic - not syncing: Segfault with no mm
+    make_umid+0x82/0x5ab
+
+Same panic, same call site as our branch. Our UML v2 rewrite of `umid.c`
+(the custom `umid_strscpy`/`umid_strnlen` helpers added for KMSAN, commit
+`f73c657f29a9`) did **not** introduce the crash — it preserved the same
+buggy flow that already existed upstream. A plausible code-only inference
+that mainline's `strscpy` would tolerate the NULL `src` via
+`DCACHE_WORD_ACCESS`/`load_unaligned_zeropad` was **wrong**: in the
+no-mm early-boot fault path the zeropad fixup does not rescue the read,
+so mainline faults too. The empirical boot caught the bad inference —
+do not declare our-vs-upstream attribution from code reading alone.
+
+Consequence: the fix repairs a genuine mainline `arch/um` bug and is
+**upstream-submittable** (queue it with W8/W9). Before/after under the
+identical `env -i` boot:
+
+| kernel | `$HOME` unset boot |
+| --- | --- |
+| `torvalds/master` | `Segfault with no mm` panic at `make_umid+0x82` — never reaches userspace |
+| our `next` (fixed) | warns, "Failed to initialize umid, trying with a random umid", reaches userspace, runs init |
+
 ## Bottom line
 
 Yes, UML boots UML — the inner kernel comes up completely. Full
