@@ -83,6 +83,15 @@ static int __init make_uml_dir(void)
 
 	kmsan_unpoison_memory(dir, sizeof(dir));
 
+	/*
+	 * A previous failed make_uml_dir() resets uml_dir to NULL (see the
+	 * err path below). make_umid() runs from several places during early
+	 * boot, so bail gracefully on re-entry rather than dereferencing a
+	 * NULL uml_dir.
+	 */
+	if (uml_dir == NULL)
+		return -ENOENT;
+
 	if (*uml_dir == '~') {
 		char *home = getenv("HOME");
 
@@ -325,7 +334,9 @@ static int __init make_umid(void)
 	if (umid_setup)
 		return 0;
 
-	make_uml_dir();
+	err = make_uml_dir();
+	if (err)
+		return err;
 
 	if (*umid == '\0') {
 		umid_strscpy(tmp, uml_dir, sizeof(tmp));
