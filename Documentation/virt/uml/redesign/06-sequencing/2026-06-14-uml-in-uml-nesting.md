@@ -36,27 +36,37 @@ userspace exec takes a fatal signal. So **matryoshka depth = 1 functional
 level + 1 kernel-only half-level** with the seccomp backend (kvm-v2 can't
 nest either — no `/dev/kvm` inside L1).
 
-## Robustness bug found (not yet fixed)
+## Robustness bug found AND FIXED
 
 With `$HOME` unset (as in a bare nested init environment), the inner UML
-panics during early boot: `make_uml_dir: no value in environment for
+panicked during early boot: `make_uml_dir: no value in environment for
 $HOME` followed by `Kernel panic - not syncing: Segfault with no mm`
-(arch/um/os-Linux/umid.c, `make_uml_dir` → called from `make_umid_init`).
-The fault is inside `make_uml_dir` on the `home == NULL` path, during an
-early initcall where there is no `mm`, so the normal fault path turns into
-a panic. Setting `$HOME` avoids it (and lets L2 boot fully, as above).
+(arch/um/os-Linux/umid.c).
 
-A first fix attempt — having `make_umid` check `make_uml_dir`'s return
-value (which it currently ignores) — was reverted: the disassembly shows
-the fault is *inside* `make_uml_dir` before it returns, so the caller-side
-check does not prevent it. The real fix needs to harden the `home == NULL`
-early-boot path in `make_uml_dir` itself (graceful failure instead of a
-no-mm segv). Left as a follow-up; it only triggers with an unset `$HOME`,
-an unusual configuration.
+Root cause (pinned by disassembly + RIP): `make_uml_dir()` takes its
+`home == NULL` error path and resets the global `uml_dir` to NULL.
+`make_umid()` ignored the return value and called
+`umid_strscpy(tmp, uml_dir /*NULL*/, ...)` (RIP `umid_strscpy+0x13`,
+caller `make_umid+0x82`) -> NULL deref during a no-mm initcall -> panic.
+`make_umid()` also runs from several early-boot call sites, so once the
+first call nulled `uml_dir`, a later call faulted at `if (*uml_dir ==
+'~')` (RIP `make_uml_dir+0x34`) the same way.
+
+Fixed (commit "um: fix early-boot segfault in make_umid() when $HOME is
+unset"): `make_umid()` now honors `make_uml_dir()`'s return, and
+`make_uml_dir()` guards against a NULL `uml_dir` on re-entry. Validated:
+with `$HOME` unset the guest now boots and runs userspace (`/bin/true`
+exits cleanly) without a umid dir instead of panicking; the normal
+`$HOME` path (mconsole/umid setup) is unchanged. (My first attempt —
+only the caller-side check — was reverted because it didn't cover the
+re-entry deref; both parts are needed.)
 
 ## Bottom line
 
 Yes, UML boots UML — the inner kernel comes up completely. Full
 recursive nesting does not work because the inner UML can't run userspace
-(the stub trap model doesn't compose). A separate, real `make_uml_dir`
-robustness bug (segfault on unset `$HOME`) was found along the way.
+(the stub trap model doesn't compose). A separate, real early-boot
+robustness bug (segfault on unset `$HOME`) was found along the way **and
+fixed** — so the inner UML now boots gracefully even without `$HOME` (it
+just runs without a umid/mconsole dir); the no-nested-userspace limit is
+the remaining wall.
