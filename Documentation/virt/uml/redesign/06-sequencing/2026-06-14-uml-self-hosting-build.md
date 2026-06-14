@@ -41,37 +41,43 @@ alone is insufficient (cc1 lives in libexec, not lib/gcc; collect2 still
 fails to find `ld`). This is a UML+hostfs limitation, not a toolchain bug;
 it would also affect any in-guest compilation over hostfs.
 
-## SMP bug: intermittent startup livelock under parallel build load
+## SMP under parallel build: one unreproduced wedge (NOT a confirmed bug)
 
 SMP boots cleanly at ncpus=1/2/4 and runs light/single-process workloads
 fine (the KCSAN race profile passes; an SMP `ncpus=4 -j1` build progresses
-normally, 220 obj/4 min). But the SMP `ncpus=4 -j4` build **intermittently
-livelocks at the defconfig→compile transition**:
+normally). SMP `ncpus=4 -j4` self-builds **reliably**: two full builds
+completed (the 369 s one above; another partial run reached 661 obj/4 min)
+and a dedicated catch harness then ran **31 consecutive clean `-j4`
+attempts, all of which progressed past the early transition — 0 hangs.**
+Counting everything, **33 of 34 clean `-j4` runs worked.**
 
-- Run 1: hung at 9 objects for ~57 min. The UML kernel host process spun at
-  ~199% CPU (state R) while the build's `uml-userspace` children SLEPT (0%
-  CPU) and zero new objects appeared — a kernel-side livelock, not slowness.
-  Killed manually.
-- Run 2 (`-j4`, 4-min window): progressed to 661 objects.
-- Run 3 (`-j4`, full): **completed** (934 obj, 369 s).
+The lone exception was the very first self-build: it wedged at 9 objects
+for ~57 min with the UML kernel host process spinning at ~199% CPU
+(state R) while the build's `uml-userspace` children slept and no objects
+appeared — a real kernel-side wedge at that moment. **It has not
+reproduced in 31 subsequent clean attempts**, so it is treated as a
+**rare, unreproduced one-off, not a confirmed reproducible SMP bug**; its
+cause is unconfirmed (could be a rare scheduler/IPI race, or a one-time
+startup/host/hostfs transient on a cold first run).
 
-So ~1 of 3 `-j4` attempts hung; the others ran clean. This is a **race**
-triggered by many concurrent runnable userspace processes across vCPUs, not
-a deterministic failure, and it strikes early (around the first wave of
-parallel compiler spawns). It does not occur with `-j1` on SMP or with any
-`-j` on UP.
+Honesty note: an earlier draft of this file called it an "intermittent
+~1/3 livelock." That estimate was inflated — it rested on the single
+first-run wedge plus a `-j8` "repro loop" whose readings were a
+measurement artifact (a sed bug in that harness mangled `O=`, so those
+builds went in-tree, contaminated the source tree, and left `O=` empty —
+the "0-object hangs" were never real builds). After `mrproper` and a
+fixed harness, the clean data shows SMP `-j4` is reliable.
 
-**Fix locus (hypothesis):** UML SMP scheduler / cross-vCPU IPI / stub
-worker handoff under a burst of concurrently-runnable processes. The
-signature (kernel spinning while all runnable userspace tasks block) points
-at a missed wakeup / IPI or a run-queue/stub lock that can wedge under the
-initial parallel-spawn burst.
+If the wedge is ever caught again, the diagnostic is ready
+(`thread apply all bt` on the spinning UML host process via gdb; the
+binary is not stripped). Likely suspects if real: UML SMP scheduler /
+cross-vCPU IPI / stub-worker handoff under the first parallel-spawn burst.
 
 ## Bottom line
 
-- Self-hosting compilation works under UML v2 (UP and SMP), producing
-  bootable kernels; SMP `-j4` is the fast path (~6 min).
-- The one open SMP defect is an intermittent parallel-build startup
-  livelock — a real stability bug worth fixing before SMP `-j4` workloads
-  can be called reliable, but not a blocker for the broader v2 work
-  (single-process and UP loads are solid).
+- Self-hosting compilation works under UML v2 on both UP and SMP,
+  producing bootable kernels; SMP `-j4` is the fast path (~6 min) and is
+  reliable across 33/34 clean runs.
+- There is **no confirmed reproducible SMP bug** from this exercise — only
+  a single unreproduced first-run wedge (0/31 on retry). Worth keeping an
+  eye on, but not a characterized defect.
