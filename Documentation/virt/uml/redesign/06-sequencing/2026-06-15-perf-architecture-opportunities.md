@@ -7,6 +7,33 @@ benchmark), plus a corrected assessment of what is testable in this environment
 (passwordless sudo + virtual networking — not the "needs lab hardware" I first
 claimed).
 
+## Status summary (2026-06-15)
+
+Investigable/measurable items are **complete**; remaining items are large
+implementation / deep host-debug.
+
+- **DONE (measured, committed):** T1 vector2 throughput **0.992x parity** (39 Gbit/s);
+  T5 CPU/Gbit *methodology* (fixed-time invalid — needs fixed-bytes redo); P1
+  seccomp trap cost = futex->`__schedule` (19-35%); **P1-opt spin-before-block
+  prototyped + REFUTED + reverted** (schedule is the handoff, not waste); P2 kvm-v2
+  fs = `KVM_RUN` vmexit ~40% + SREGS ~9%, **threshold sweep flat** -> structural;
+  **P3/P4 deprioritized by the profiles** (not hot spots); P5 dismissed (~3.5%,
+  boot-dominated). **Headline: the per-syscall trap cost is structural — every
+  micro-opt is deprioritized-by-data or refuted-by-measurement.**
+- **T1b (real bug, mitigated):** a vector2 **TX stall on host-tap reuse across
+  drivers** (NOT a crash — corrected; the "fatal signal" was the harness `timeout`
+  SIGTERM). Harness fixed (fresh tap per driver). **Four root-cause hypotheses
+  tested and refuted** (vnet_hdr, GSO/SG, SEGV/UAF, missing TX-writable IRQ); next
+  lead is host-side tun TAP state after legacy detach (`sink rx == 0`). Reliable
+  repro recorded. Not on any production path.
+- **OPEN (large / multi-session, scoped with recipes):** T1b host-tap-state
+  root-cause; T2 multiqueue *fairness* (functional MQ proven; needs a non-fragile
+  harness); T3/T4 implement real `raw`/`gre`/`l2tpv3` datapaths (new driver code);
+  P1-opt CPU-separation (affinity + scheduler).
+- **Discipline note:** nothing unvalidated was shipped — two prototypes (P1-opt
+  spin, T1b TX-IRQ) were built, measured, found not to help, and reverted; several
+  initial conclusions were corrected by experiment.
+
 Two tracks:
 - **P-series** — performance / architecture improvements (ranked by leverage).
 - **T-series** — test-capability work that unblocks F1/F3 here, without physical
