@@ -92,6 +92,26 @@ step confirms it — diagnose before act.
   documented finding that the gap is intrinsic.
 - **Effort:** M. **Risk:** medium — TLB correctness is subtle; gate on the mm/TLB
   selftests.
+- **Attribution (DONE, 2026-06-15):** `perf record -g` on the UML host process
+  running an fs-syscall loop (open/write/close/stat/open/read/close x 2.5M) under
+  each backend on the same kernel. Measured gap here: kvm-v2 **32.9 s** vs seccomp
+  **28.2 s** = **~1.17x** (lighter than F2's py 1.5x — the regression magnitude is
+  workload-dependent). Where kvm-v2's time goes (`kvm_v2_vcpu_run` 94%):
+  - `KVM_RUN` ioctl path ~40% (`kvm_arch_vcpu_ioctl_run` 35%), of which
+    **`vcpu_enter_guest` 15.7%** (the actual vmexit/guest-enter, `svm_vcpu_run`
+    3.5%) — inherent to the design.
+  - **SREGS reload ~9%**: `sync_regs`->`__set_sregs` **6.8%** + `__get_sregs` 2.3%
+    — this is the `prev_roots`/TLB-lag tax (the P2 hypothesis), **confirmed real and
+    tunable but NOT dominant**.
+  - `kvm_load_guest_fpu` ~2%.
+  For contrast, seccomp's fs cost is the **same futex->`__schedule` round-trip P1
+  found** (futex_wait->schedule->`__schedule` ~35%). So neither backend has a cheap
+  trapping-syscall path; kvm-v2 trades the futex/scheduler round-trip for a
+  `KVM_RUN` vmexit of similar weight, plus the ~9% SREGS overhead.
+- **Next (targeted):** the ~9% SREGS reload is the one clearly-tunable lever —
+  sweep `KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD` (1/3/8/16/off) and measure the
+  fs-loop wall + `__set_sregs` share, gated on the TLB/mm selftests. The larger
+  `KVM_RUN`-vmexit cost is structural and not cheaply reducible.
 
 ### P3. Make the gadget state-page refresh lazy (KVM_RUN hot path)
 
