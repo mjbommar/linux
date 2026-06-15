@@ -151,36 +151,67 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
   vector2 is at **throughput parity** with legacy vector at ~39 Gbit/s.
 - **Acceptance:** met (>= 0.85x). **Effort:** done.
 
-### T1b. BUG: `run-tcp-throughput.sh` (non-umlctl shim) crashes vector2
+### T1b. BUG: vector2 crashes when reusing a host tap a prior driver used
 
-- **What:** the *other* checked-in throughput selftest,
-  `net-bench/run-tcp-throughput.sh`, **crashes** the vector2 guest with
-  `UML: fatal signal; exiting` the moment the TCP sender runs; it reports vector2
-  throughput as `MISSING` and `VERDICT: FAIL` while legacy vector passes at ~15
-  Gbps in the same run.
-- **Evidence (this session):** vector2 boot log shows vec2.0 up with IP/route, then
-  fatal signal at `python3`. The harness's `exec-uml-fd.py` opens the TAP **without
-  `IFF_VNET_HDR`** ("feeds raw Ethernet frames"), whereas the production umlctl path
-  (T1, which passes) uses `IFF_VNET_HDR` + `TUNSETOFFLOAD`.
-- **Hypothesis:** vector2's fd transport assumes a vnet_hdr-prefixed frame layout;
-  fed raw frames it misparses lengths and faults. A header/offload **mismatch on an
-  inherited fd should fail gracefully (error, link down), not crash the guest** —
-  this is a robustness gap (same class as the make_umid NULL-deref: a crash where
-  graceful failure is required).
-- **Approach:**
-  1. Confirm the trigger: rerun the shim with `IFF_VNET_HDR` added to
-     `exec-uml-fd.py` -> expect it to pass (isolates vnet_hdr as the cause).
-  2. Harden vector2's fd-transport setup to detect/validate the tap's vnet_hdr +
-     offload state (e.g. via `TUNGETIFF`/`TUNGETFEATURES`) and refuse cleanly
-     (driver init error, interface stays down) on mismatch instead of faulting.
-  3. Fix the selftest: either set `IFF_VNET_HDR` in `exec-uml-fd.py`, or make it
-     `SKIP` for vector2 and defer to the umlctl harness (T1).
-- **Acceptance:** a vnet_hdr/offload mismatch on a vector2 fd transport yields a
-  clean error, never `UML: fatal signal`; both throughput selftests pass or skip
-  cleanly.
-- **Effort:** S (test fix) + M (driver hardening). **Risk:** low; isolated to fd
-  transport setup. **Priority:** high — it's a guest-crash on a malformed/mismatched
-  input, exactly the robustness class worth fixing.
+> **Correction to my first read of this.** I initially blamed a vnet_hdr/offload
+> framing mismatch. That is **wrong** — controlled testing disproved it. The real,
+> precisely-isolated trigger is **host-tap reuse across UML net drivers**, and the
+> packets at crash time are tiny and normal. Recording the full diagnosis honestly.
+
+- **What:** `net-bench/run-tcp-throughput.sh` creates one tap and runs legacy
+  `vector` then `vector2` on it (per rep). The vector2 run takes
+  `UML: fatal signal; exiting` during early TCP and reports `MISSING` / `FAIL`,
+  while legacy vector passes in the same run.
+- **Reliable repro (isolated this session):** boot a legacy-`vector` UML on a tap,
+  power it off, then boot a `vector2` fd-handoff UML on the **same** tap and send
+  TCP. Crashes **6/6**. Recreating the tap between the two runs: passes **3/3**.
+  (Repro script kept at `/tmp/v2seq.sh` during the session; recipe: tap via
+  `ip tuntap add ... mode tap`, legacy `vec0:transport=tap,ifname=$TAP`, then
+  `vector2 vec2.0:transport=fd,fd=200` via a fd-inheriting wrapper, `backend=seccomp`.)
+- **What it is NOT (each ruled out by test):**
+  - *Not* a vnet_hdr/framing mismatch: a fresh no-vnet_hdr tap runs vector2 fine
+    (ping + sustained 10s TCP, ~2.9 Gbit/s). Adding `IFF_VNET_HDR` to the shim
+    only changed timing.
+  - *Not* GSO/TSO/SG: `gso=0,gro=0,csum=0` still crashes; at crash time TX is
+    `len=74 gso=0 nr_frags=0 iovcnt=1` (handshake) and RX is 70-107 byte ACKs —
+    no large/segmented frames involved, bulk transfer never starts.
+  - *Not* offload state: a tap pre-loaded with `TUNSETOFFLOAD(TSO)` then opened
+    raw by vector2 runs fine. (`TUNSETOFFLOAD` is also per-fd and EINVALs on a
+    no-vnet_hdr fd, so legacy's offload does not persist to vector2's fd.)
+  - *Not* SMP: crashes at `ncpus=1` and `ncpus=2` equally.
+  - *Not* in the RX/TX read/write calls: instrumented `os_read_file`/`os_writev`
+    return normal values right up to the fault.
+- **What it is:** a SEGV inside the UML kernel (last-ditch handler, no register
+  dump), during early TCP, **only** when vector2 reuses a tap a prior legacy-vector
+  UML attached/detached from. Timing-sensitive: `strace` and a KASAN build both
+  perturb it (KASAN crashed even earlier at init with no net-path report —
+  inconclusive). Signature (reliable + timing-sensitive + not in the obvious
+  datapath + tied to resource reuse) points at a **use-after-free / lifecycle race**
+  around channel/tap teardown+reattach, not a data-format bug.
+- **Root cause: NOT pinned to a line** despite RX+TX printk, strace, and KASAN.
+  Needs deeper tooling: gdb with `handle SIGSEGV` tuned to ignore UML's normal
+  guest-fault SIGSEGVs and catch the fatal one, and/or KCSAN (race detector).
+- **Done this session (validated):** fixed the harness — `run_bench_iter()` now
+  calls `setup_tap` per driver run, so the bench no longer reuses a tap across
+  drivers; vector2 stops crashing and produces a real result instead of `MISSING`.
+  (The underlying driver bug remains.) Note the shim still reports a low ratio
+  (~0.16) afterward, but that is a *separate* shim artifact, not a vector2
+  regression: its `exec-uml-fd.py` opens a raw (no-vnet_hdr, no-`TUNSETOFFLOAD`) fd
+  so vector2 gets no GSO (~2.3 Gbit/s) while legacy gets offload via UML's own tap
+  open (~15 Gbit/s) — an apples-to-oranges comparison. The authoritative,
+  offload-on-both-sides number is the umlctl harness (T1, 0.992 parity). The shim
+  should be marked informational (raw-path only) or taught to set
+  `IFF_VNET_HDR`+`TUNSETOFFLOAD` to match production; deferred as low value since
+  T1 already gives the real comparison.
+- **Impact:** **production single-driver use is unaffected** — vector2 over the
+  umlctl fd path is at 39 Gbit/s parity (T1), and standalone vector2 on a fresh tap
+  works at all sizes/durations. The crash needs two different UML net drivers
+  sharing one host tap in sequence, which is a test pattern, not a deployment one.
+- **Remaining (real, tracked):** root-cause and fix the vector2 tap-reuse SEGV with
+  gdb/KCSAN; it is a genuine robustness bug (a guest should not crash because a host
+  tap was previously used), just not on any production path.
+- **Effort:** harness fix done (S); driver root-cause + fix is M-L (deep race/UAF
+  debugging). **Priority:** medium (real bug, non-production trigger).
 
 ### T2. Multiqueue fairness over a real multi-queue TAP
 

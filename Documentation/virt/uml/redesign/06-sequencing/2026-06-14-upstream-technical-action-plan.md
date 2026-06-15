@@ -347,10 +347,12 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   gives vector2 **0.992x** legacy vector (39,363 vs 39,668 Mbps, ~39 Gbit/s) ->
   **PASS, throughput parity confirmed.** F3's core question is answered positive.
   **Bug found doing this:** the *other* selftest `run-tcp-throughput.sh` crashes
-  vector2 (`UML: fatal signal`) because its `exec-uml-fd.py` opens the TAP without
-  `IFF_VNET_HDR` while vector2's fd transport assumes it — a mismatch should fail
-  gracefully, not fault. Tracked in `2026-06-15-perf-architecture-opportunities.md`
-  (T1b). What genuinely still needs a lab NIC: absolute 10/40/100G line rate and
+  vector2 (`UML: fatal signal`). Initially mis-blamed on a vnet_hdr mismatch; the
+  real, isolated trigger is **host-tap reuse across UML net drivers** (legacy vector
+  then vector2 on the same tap; fresh tap per driver fixes it). Harness fixed
+  (fresh tap per run); the underlying vector2 tap-reuse SEGV is a real robustness
+  bug, not root-caused to a line. Full diagnosis in
+  `2026-06-15-perf-architecture-opportunities.md` (T1b). What genuinely still needs a lab NIC: absolute 10/40/100G line rate and
   hardware-offload interaction; the `raw`/`l2tpv3`/`gre` datapaths remain feature
   work but are now validatable here via veth/`gretap`/`ip l2tp` (T3/T4).
 

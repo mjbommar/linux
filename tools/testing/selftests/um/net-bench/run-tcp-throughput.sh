@@ -99,6 +99,16 @@ run_bench_iter() {
     local DRV=$1
     local REP=$2
     local CMDLINE_NET DEV
+
+    # Give each driver run a freshly created tap. A tap that a previous
+    # UML net driver (e.g. legacy vector) attached to and detached from is
+    # left in a state that makes a subsequent vector2 fd-handoff run take a
+    # fatal signal during early traffic (reliably reproducible; see
+    # Documentation/virt/uml/redesign/06-sequencing/2026-06-15-perf-architecture-opportunities.md
+    # T1b). Recreating the tap per run avoids the cross-driver tap reuse so
+    # the benchmark measures the datapath rather than that latent bug.
+    setup_tap
+
     if [ "$DRV" = "vector" ]; then
         CMDLINE_NET="vec0:transport=tap,ifname=$TAP,depth=128"
         DEV="vec0"
