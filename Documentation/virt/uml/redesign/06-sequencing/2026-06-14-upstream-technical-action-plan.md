@@ -341,9 +341,18 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   transport 8, fake_host 10, model 7, cmdline 5, netdev 18, ethtool 6, host_fd 14,
   host_tap 9), and the loopback datapath smokes pass: `vector2-inproc-tap-smoke`,
   `vector2-fd-handoff-smoke`, and `vector2-fd-multiqueue-smoke` (4-queue fd handoff,
-  fds 200..203). So the existing tap/fd datapath and multiqueue handoff are sound;
-  what remains is the cross-host `raw`/`l2tpv3`/`gre` datapaths and the real-NIC
-  throughput + per-queue fairness numbers, which need lab hardware.
+  fds 200..203).
+  **Real-TAP throughput (2026-06-15, corrected — sudo + TAP, NOT lab-hardware-bound
+  as I first claimed):** `run-tcp-throughput-via-umlctl.sh` (production fd handoff)
+  gives vector2 **0.992x** legacy vector (39,363 vs 39,668 Mbps, ~39 Gbit/s) ->
+  **PASS, throughput parity confirmed.** F3's core question is answered positive.
+  **Bug found doing this:** the *other* selftest `run-tcp-throughput.sh` crashes
+  vector2 (`UML: fatal signal`) because its `exec-uml-fd.py` opens the TAP without
+  `IFF_VNET_HDR` while vector2's fd transport assumes it — a mismatch should fail
+  gracefully, not fault. Tracked in `2026-06-15-perf-architecture-opportunities.md`
+  (T1b). What genuinely still needs a lab NIC: absolute 10/40/100G line rate and
+  hardware-offload interaction; the `raw`/`l2tpv3`/`gre` datapaths remain feature
+  work but are now validatable here via veth/`gretap`/`ip l2tp` (T3/T4).
 
 ## Execution order
 
