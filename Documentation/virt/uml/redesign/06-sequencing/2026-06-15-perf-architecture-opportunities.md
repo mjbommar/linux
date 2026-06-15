@@ -320,6 +320,21 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
   single-queue starvation.
 - **Effort:** M. **Risk:** low. **Hardware-bound part:** none (TAP multi-queue is
   software).
+- **Status (2026-06-15):** *functional* 4-queue multiqueue is **already confirmed**
+  this session — `vector2-fd-multiqueue-smoke` passes (4 launcher-owned tap-queue
+  fds 200..203, guest netdev `numtxqueues 4`, connectivity OK). The *fairness
+  distribution* measurement is fully scoped: vector2 exposes per-queue counters
+  named `queue%u_tx_ring_enqueued` / `queue%u_tx_ring_completed`
+  (`vector2_ethtool.c`), so the recipe is: umlctl `up` with `[network] queues = 4`
+  (as in the smoke), an init that drives ~16 concurrent TCP flows to the gateway,
+  then `ethtool -S $UMLCTL_NETDEV | grep tx_ring_enqueued`, and compute max/min (or
+  CoV) across the four `queue*_tx_ring_enqueued` values. **Two harness attempts this
+  session failed on host-side tooling fragility** (multi-line workload embedded in
+  the TOML `cmd` / nested-heredoc + `set -e`/`pkill` interactions), **not** on
+  anything in vector2. Clean re-attempt: put the flow-gen + ethtool dump in a
+  standalone hostfs script referenced by `cmd = "/path/work.sh"` (not embedded), and
+  run it outside the deeply-nested-heredoc shell context. Deferred to that clean
+  harness.
 
 ### T3. Implement + validate the `raw` (AF_PACKET) vector2 datapath
 
