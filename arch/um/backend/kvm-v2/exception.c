@@ -47,6 +47,7 @@
 #include <asm/trace/um_backend.h>
 
 #include <os.h>				/* os_ioctl_generic */
+#include <shared/timetravel.h>		/* time_travel_mode, TT_MODE_OFF */
 
 #include "kvm_v2_backend.h"
 #include "syscall_trap.h"
@@ -1007,6 +1008,25 @@ static void kvm_v2_exception_maybe_upgrade_gadget(struct kvm_v2_vm *vm)
 
 	if (!IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_GADGET)) {
 		pr_debug("um: kvm-v2 exception_install: gadget disabled; using fallback LSTAR\n");
+		return;
+	}
+
+	/*
+	 * The stay-in-guest gadget services clock_gettime(CLOCK_MONOTONIC) and
+	 * time() from a per-vCPU state page (a cached ktime_get_ns() refreshed
+	 * at KVM_RUN entry) without a vmexit, so those reads never reach the
+	 * kernel time path and never emit a time-travel advance event. Under any
+	 * time-travel mode that breaks determinism: the guest sees time frozen
+	 * at the last KVM_RUN, and record/replay -- whose clock observation only
+	 * fires on time-travel advances (see um_on_time_travel_advance()) --
+	 * cannot see or reproduce a gadget-serviced clock read. Keep the 5-byte
+	 * fallback so every syscall traps and clock reads go through the
+	 * deterministic read_clock_ns path. time_travel_mode is a compile-time
+	 * TT_MODE_OFF constant when time-travel support is configured out, so
+	 * this check is free in non-time-travel builds.
+	 */
+	if (time_travel_mode != TT_MODE_OFF) {
+		pr_info("um: kvm-v2 exception_install: time-travel active; keeping fallback LSTAR (gadget disabled for clock determinism)\n");
 		return;
 	}
 

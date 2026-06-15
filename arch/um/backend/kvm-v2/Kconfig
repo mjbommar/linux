@@ -49,6 +49,14 @@ config UM_BACKEND_KVM_V2_GADGET
 	  The result is a backend where every SYSCALL takes the KVM_EXIT_IO
 	  path.
 
+	  Time-travel: the gadget services clock_gettime(CLOCK_MONOTONIC) and
+	  time() in-guest from a cached clock value with no vmexit, so those
+	  reads emit no time-travel advance event and are invisible to
+	  record/replay. The gadget is therefore disabled automatically at
+	  runtime whenever time_travel_mode != TT_MODE_OFF (every syscall
+	  traps so clock reads stay deterministic); it is active only in
+	  normal, non-time-travel operation.
+
 	  Say N for security-sensitive deployments that don't want a custom
 	  CPL=0 trampoline body executing in the guest. Say Y (default) to
 	  enable the lower-overhead syscall path.
