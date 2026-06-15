@@ -144,12 +144,20 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
 - **Why it matters to us:** A contract that enumerates the other backend's internals
   so `os-Linux` code can branch on them isn't an abstraction — it leaks exactly what
   it claims to hide, and it cements the A1 coupling.
-- **Change:** Make stub mechanics backend-private (reaper/fd-map/futex behavior
-  exposed only via the operations callers actually need); remove `stub_*` from the
-  public contract. Naturally falls out of A1.
-- **Acceptance:** no caller outside a backend reads a `stub_*` field; the four bools
-  are gone from the public contract.
-- **Effort:** M (mostly subsumed by A1).
+- **Assessment / disposition (DONE):** Audited the flags. None is ever set false;
+  the ptrace backend that once set them differently is no longer built; both
+  remaining backends (seccomp, and kvm-v2 reusing the seccomp stub for its trap
+  path) set all four `true`. So they are not an *accidental* leak but a legitimate
+  forward-looking **capability seam** on the "has a host stub child" axis (a future
+  non-stub backend sets them false), already documented as capability flags. The
+  real correctness risk here (NULL dispatch) was the C1 fix. Removing them would
+  mean inlining the always-true path across ~10 delicate os-Linux trap sites
+  (signal.c, process.c, skas/process.c, skas/mem.c) for a cosmetic gain while
+  dropping the very extension seam the A-workstream exists to provide — not
+  warranted. **Resolution:** keep the flags; clarified the contract comment to state
+  explicitly they are a stub-capability axis (not seccomp internals), uniform today
+  only because both built backends are stub-based.
+- **Effort:** done (doc clarification); risky refactor deliberately not taken.
 
 ### A3. Contract version says `2` but the spec documents `1`
 

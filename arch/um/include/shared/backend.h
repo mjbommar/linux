@@ -116,6 +116,16 @@ struct um_backend_ops {
 	 * Each flag is populated alongside the backend's ops struct and
 	 * read via um_backend->flag.
 	 *
+	 * These describe the "host stub child" capability axis, not seccomp
+	 * internals: a backend that runs guest userspace through a host stub
+	 * child sets them, one that does not leaves them false. Every
+	 * currently built backend (seccomp, and kvm-v2 which reuses the
+	 * seccomp stub for its trap path) sets all four, so they read
+	 * uniformly today; they remain a distinct capability seam so a
+	 * future non-stub backend can opt out without touching the os-Linux
+	 * stub paths that consult them. (The ptrace backend, which set them
+	 * differently, is no longer built.)
+	 *
 	 * uses_stub_reaper: true when the backend's mm_attach
 	 * creates a host child (mm_id->pid > 0) whose lifecycle
 	 * is driven by a SIGCHLD-registered reaper IRQ. Seccomp
