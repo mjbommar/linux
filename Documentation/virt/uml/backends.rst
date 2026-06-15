@@ -233,6 +233,28 @@ ptrace          Removed. Pin to UML v6.16 or earlier
 ==============  ==========================================================
 
 ******************
+Limitations
+******************
+
+**Nesting (UML-in-UML) is one level deep.** A UML guest can launch
+another UML kernel (the ``linux`` ELF is visible via hostfs), and the
+inner (L2) kernel boots completely. But L2 cannot run guest *userspace*:
+both backends run guest userspace by trapping it from a host process
+(seccomp via ``SIGSYS``; kvm-v2 via a stub child plus ``KVM_EXIT_IO``),
+and that trap model does not compose when L2's stub must itself run as
+trapped userspace inside L1, so L2's first userspace exec takes a fatal
+signal. kvm-v2 cannot nest either, as there is no ``/dev/kvm`` inside an
+L1 guest. Net: one functional level plus one kernel-only level.
+
+**The kvm-v2 in-guest gadget is disabled under time-travel.** The
+stay-in-guest LSTAR gadget services a few trivial syscalls (including
+``clock_gettime(CLOCK_MONOTONIC)`` and ``time()``) without a vmexit, so
+those reads cannot participate in deterministic time ordering. The gadget
+is therefore not installed when ``time_travel_mode != TT_MODE_OFF``, and
+is bypassed while record/replay is active; every syscall traps in those
+modes (see ``UM_BACKEND_KVM_V2_GADGET``).
+
+******************
 For developers
 ******************
 

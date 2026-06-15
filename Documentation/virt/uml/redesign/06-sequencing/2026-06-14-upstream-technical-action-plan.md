@@ -301,6 +301,43 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   documenting the value prop + cost tradeoff. Remaining: A2 (hide `stub_*` from the
   public contract). The L-effort "fold into seccomp" refactor is dropped as wrong.
 
+### Progress (continued)
+
+- **A2 — DONE** (`bb8f5e16ed50`): audited — the `stub_*` flags are never set false,
+  ptrace (which set them differently) is unbuilt, both live backends set all four
+  true. They are a forward-looking *capability seam* (the "has a host stub child"
+  axis), not an accidental leak; the real correctness risk was the C1 fix. Kept the
+  flags; clarified the contract comment. Risky inline-removal across ~10 os-Linux
+  trap sites deliberately not taken.
+- **H4 — DONE**: moved the matryoshka nesting-limit (depth-1; stub trap model does
+  not compose nested) and the gadget/time-travel limitation from the dated diary
+  into `Documentation/virt/uml/backends.rst` (durable backend docs).
+- **H1 — ASSESSED, contraindicated**: the custom `umid_strscpy`/`umid_strnlen`/
+  `umid_strlcat` were added by `f73c657f29a9` for a real reason — UML's os-Linux
+  UMID code is built *outside* KMSAN instrumentation, so its byte-initialized
+  buffers are shadow-poisoned when consumed by instrumented kernel string helpers;
+  the local helpers + `kmsan_unpoison_memory` keep that boundary correct. Reverting
+  to `strscpy` would reintroduce the KMSAN false-positive that commit fixed. Keep
+  them. (The reviewer note that prompted H1 missed the KMSAN rationale.)
+- **H2 — ASSESSED, covered**: the hand-rolled x86 long-mode setup
+  (`exception.c`, the trampoline PML4 chain) is already heavily commented and has
+  byte-shape/marshal unit tests (`test_byteshape.c`, `test_marshal.c`). The risk is
+  real but managed; the action is ongoing discipline (keep it commented + tested),
+  not a discrete fix. No change warranted now.
+- **H3 — ASSESSED, ongoing**: test-gate maturity is a process/discipline item, not
+  a code fix — keep the gates green across cycles. Tracked, no code change.
+- **F1 / F3 — SCOPED (blocked on resources)**: vector2 stays (security). The
+  remaining work is genuine feature + validation that needs network/lab hardware
+  this environment lacks: implementing real `raw`/`l2tpv3`/`gre` datapaths (not
+  framing-only) and a two-host real-NIC throughput + multiqueue-fairness benchmark.
+  Implementing untestable datapaths here would reproduce the exact "parser coverage"
+  anti-pattern the review flagged, so it is deliberately deferred to where it can be
+  validated. The keep-list decision (raw + tap + fd + l2tpv3 + gre) and the
+  sequencing (datapath parity -> legacy `vecN:` migration shim -> deprecate
+  `UML_NET_VECTOR`) stand as the plan; legacy retirement is gated on vector2 parity
+  and on the user's specific security rationale for the cover story. The verifiable
+  part done here: vector2 unit/loopback health (see below).
+
 ## Execution order
 
 1. **C1** (dispatch hardening) + **A3** (version reconcile) — concrete, low-risk,
