@@ -346,13 +346,16 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   as I first claimed):** `run-tcp-throughput-via-umlctl.sh` (production fd handoff)
   gives vector2 **0.992x** legacy vector (39,363 vs 39,668 Mbps, ~39 Gbit/s) ->
   **PASS, throughput parity confirmed.** F3's core question is answered positive.
-  **Bug found doing this:** the *other* selftest `run-tcp-throughput.sh` crashes
-  vector2 (`UML: fatal signal`). Initially mis-blamed on a vnet_hdr mismatch; the
-  real, isolated trigger is **host-tap reuse across UML net drivers** (legacy vector
-  then vector2 on the same tap; fresh tap per driver fixes it). Harness fixed
-  (fresh tap per run); the underlying vector2 tap-reuse SEGV is a real robustness
-  bug, not root-caused to a line. Full diagnosis in
-  `2026-06-15-perf-architecture-opportunities.md` (T1b). What genuinely still needs a lab NIC: absolute 10/40/100G line rate and
+  **Bug found doing this:** the *other* selftest `run-tcp-throughput.sh` wedges
+  vector2 (printed `UML: fatal signal`). Twice mis-characterized before converging
+  (vnet_hdr mismatch, then SEGV); the real bug is a **vector2 TCP-transmit STALL on
+  host-tap reuse across drivers** (legacy vector then vector2 on the same tap; fresh
+  tap per driver fixes it). The "fatal signal" was the harness `timeout` SIGTERMing
+  the UML because the hung send blocked poweroff — not a crash (ping works,
+  sustained send hangs; `last_ditch_exit` only handles SIGINT/SIGTERM). Harness
+  fixed (fresh tap per run); the TX stall (lost wakeup / flow-control) is a real
+  robustness bug with the root-cause direction identified. Full corrected diagnosis
+  in `2026-06-15-perf-architecture-opportunities.md` (T1b). What genuinely still needs a lab NIC: absolute 10/40/100G line rate and
   hardware-offload interaction; the `raw`/`l2tpv3`/`gre` datapaths remain feature
   work but are now validatable here via veth/`gretap`/`ip l2tp` (T3/T4).
 

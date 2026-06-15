@@ -275,16 +275,25 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
   - *Not* SMP: crashes at `ncpus=1` and `ncpus=2` equally.
   - *Not* in the RX/TX read/write calls: instrumented `os_read_file`/`os_writev`
     return normal values right up to the fault.
-- **What it is:** a SEGV inside the UML kernel (last-ditch handler, no register
-  dump), during early TCP, **only** when vector2 reuses a tap a prior legacy-vector
-  UML attached/detached from. Timing-sensitive: `strace` and a KASAN build both
-  perturb it (KASAN crashed even earlier at init with no net-path report —
-  inconclusive). Signature (reliable + timing-sensitive + not in the obvious
-  datapath + tied to resource reuse) points at a **use-after-free / lifecycle race**
-  around channel/tap teardown+reattach, not a data-format bug.
-- **Root cause: NOT pinned to a line** despite RX+TX printk, strace, and KASAN.
-  Needs deeper tooling: gdb with `handle SIGSEGV` tuned to ignore UML's normal
-  guest-fault SIGSEGVs and catch the fatal one, and/or KCSAN (race detector).
+- **What it is (CORRECTED 2026-06-15 — it is NOT a SEGV):** the message
+  "UML: fatal signal; exiting" comes from `last_ditch_exit()`, which is installed
+  **only for SIGINT/SIGTERM** (`arch/um/os-Linux/main.c:357-358`), never SIGSEGV.
+  So the UML did not crash — the **harness `timeout` sent SIGTERM** because the run
+  blew past its deadline. Re-ran with a 120 s budget and progress markers: the run
+  **completes**, and the markers show **ping works (rc=0)** but a sustained **TCP
+  send HANGS** (an inner `timeout 8` around the sender returns 124). So T1b is a
+  **vector2 transmit STALL on tap reuse**, not memory corruption — which is exactly
+  why KASAN was clean and why slowing execution (strace) "fixed" it. My earlier
+  "SEGV / use-after-free" write-up was wrong; corrected here.
+- **Root-cause direction (re-aimed):** a **lost TX wakeup / flow-control deadlock**
+  in the fd transport — sustained send fills the TX ring, the tap write hits EAGAIN
+  (host not draining), vector2 stops the queue, and the wakeup that should restart
+  it (epoll/IRQ re-arm on the fd, or `netif_wake_queue`) never fires when the tap
+  was previously attached+detached by another driver. Ping survives because it is
+  low-rate and never fills the ring. Next step is to instrument the TX
+  stop/wake path (`vector2_queue`/`vector2_netdev` TX flow control + the fd's
+  poll/epoll re-arm), **not** gdb/KASAN. Reliable repro: legacy `vector` then
+  `vector2` on the same tap, sustained TCP send.
 - **Done this session (validated):** fixed the harness — `run_bench_iter()` now
   calls `setup_tap` per driver run, so the bench no longer reuses a tap across
   drivers; vector2 stops crashing and produces a real result instead of `MISSING`.
@@ -301,11 +310,15 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
   umlctl fd path is at 39 Gbit/s parity (T1), and standalone vector2 on a fresh tap
   works at all sizes/durations. The crash needs two different UML net drivers
   sharing one host tap in sequence, which is a test pattern, not a deployment one.
-- **Remaining (real, tracked):** root-cause and fix the vector2 tap-reuse SEGV with
-  gdb/KCSAN; it is a genuine robustness bug (a guest should not crash because a host
-  tap was previously used), just not on any production path.
-- **Effort:** harness fix done (S); driver root-cause + fix is M-L (deep race/UAF
-  debugging). **Priority:** medium (real bug, non-production trigger).
+- **Remaining (real, tracked):** root-cause and fix the vector2 tap-reuse **TX
+  stall** by instrumenting the fd-transport TX flow-control (queue stop/wake + the
+  fd poll/epoll re-arm); it is a genuine robustness bug (a guest's network should
+  not wedge because a host tap was previously used), just not on any production
+  path.
+- **Effort:** harness fix done (S); driver root-cause + fix is M (TX flow-control /
+  lost-wakeup debugging — a much smaller scope than the memory-corruption hunt the
+  original write-up implied). **Priority:** medium (real bug, non-production
+  trigger).
 
 ### T2. Multiqueue fairness over a real multi-queue TAP
 
