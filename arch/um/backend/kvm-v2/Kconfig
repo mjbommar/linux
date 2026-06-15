@@ -13,6 +13,18 @@ config UM_BACKEND_KVM_V2
 	  alongside seccomp; the runtime backend is still chosen by
 	  cmdline / capability probe.
 
+	  Choose v2 for what it uniquely provides -- KVM hardware
+	  isolation of the guest, checkpoint/restore (snapshot +
+	  fork-server) and deterministic record/replay -- NOT for raw
+	  syscall speed. v2 is *not* a general performance win over
+	  seccomp: measured on this tree, the KVM_EXIT_IO trap is only
+	  ~13% faster than seccomp's SIGSYS+futex for a do-nothing trap and
+	  is ~1.5-2.5x SLOWER for syscalls that do real host work (file I/O,
+	  sockets), due to the vmexit and per-mm worker / TLB-sync cost. The
+	  large speedups v2 can show come solely from the in-guest gadget
+	  (UM_BACKEND_KVM_V2_GADGET) servicing a few trivial syscalls
+	  without a vmexit, so v2 only wins on workloads dominated by those.
+
 	  Say Y to build v2 alongside seccomp. Runtime selection still
 	  happens through the backend command-line selector.
 

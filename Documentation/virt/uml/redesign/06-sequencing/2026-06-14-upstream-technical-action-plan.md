@@ -109,16 +109,28 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
 - **Why it matters to us:** Two execution models is double the maintenance and a
   permanent bitrot risk for a small team. The honest question isn't "is a second
   backend justified" — it's "why is one syscall-trap mechanism a whole backend?"
-- **Change:** Refactor kvm-v2's unique code into a **`/dev/kvm`-gated `vcpu_run`
-  fast path inside the seccomp backend**, selected at runtime on capability; delete
-  the delegating ops table and the `arch/um/backend/kvm-v2/` backend shell. Keep the
-  KVM-specific files as the fast-path implementation, not as a backend.
-- **Decision gate:** do this only if F2 shows a real win; otherwise the fast path
-  itself is in question. So **A1 is gated on F2.**
-- **Acceptance:** one backend in `arch/um/backend/`; the KVM exit path is a
-  runtime-selected fast path; no `seccomp_*` symbol dispatched through a kvm-v2 ops
-  table.
-- **Effort:** L.
+- **Change (reassessed — DONE as analysis):** The decision gate (F2) came back
+  **negative**, which inverts the original plan. F2 (`2026-06-14-f2-kvm-vs-seccomp-bench.md`)
+  shows the KVM `KVM_EXIT_IO` trap is *not* a fast path: ~13% faster than seccomp
+  only for a do-nothing trap, and **1.5-2.5x slower** for syscalls that do real
+  host work. So there is **no general fast path to extract**, and the original
+  "reshape into a `/dev/kvm`-gated fast path inside seccomp" is **contraindicated**.
+  kvm-v2's actual value is its feature surface that fundamentally needs a KVM VM
+  and a full backend: **hardware isolation, snapshot/fork-server
+  (`snapshot.c`/`snapshot_elf.c`), and deterministic record/replay (`record.c`)** —
+  none of which can live as a "fast path inside seccomp". Like vector2, this is a
+  backend that stays for what it uniquely enables, not for perf.
+- **What was actually done:** (1) the Kconfig help now states the honest value
+  proposition + the measured syscall-cost tradeoff so users opt in for isolation/
+  snapshot/replay rather than expecting speed; (2) the remaining legitimate cleanup
+  is **A2** (stop leaking `stub_*` seccomp internals through the public contract) —
+  the ops *delegation* to seccomp is correct (kvm-v2 genuinely reuses the seccomp
+  stub for the trap path), it just shouldn't be exposed as contract surface.
+- **Not doing:** deleting the kvm-v2 backend or merging it into seccomp — that
+  would drop isolation/snapshot/replay. (Flag for the user if a perf-only role was
+  ever intended; the data says treat kvm-v2 as an opt-in feature backend, default n.)
+- **Effort:** the L refactor is dropped; what remains is A2 (M) + the honest docs
+  (done).
 
 ### A2. The contract leaks seccomp internals through `stub_*` bools
 
@@ -270,6 +282,16 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   complementary mechanisms: the pre-existing `OFF_RECORD` bypass (record/replay)
   and C2's new time-travel gate. No bug; documented the rationale next to the
   gadget body.
+- **F2 — DONE** (measurement + doc `2026-06-14-f2-kvm-vs-seccomp-bench.md`): KVM
+  trap is ~13% faster than seccomp only for a do-nothing trap and **1.5-2.5x
+  slower** for real file/socket syscalls; all of kvm-v2's headline speed is the
+  in-guest gadget on trivial syscalls. Net: kvm-v2 is a perf **regression** except
+  on trivial-syscall-bound workloads.
+- **A1 — REASSESSED (reshape contraindicated)**: F2 inverts the premise — there is
+  no general fast path to extract. kvm-v2 stays as an opt-in *feature* backend
+  (isolation/snapshot/record-replay), not a perf backend. Done: honest Kconfig help
+  documenting the value prop + cost tradeoff. Remaining: A2 (hide `stub_*` from the
+  public contract). The L-effort "fold into seccomp" refactor is dropped as wrong.
 
 ## Execution order
 
