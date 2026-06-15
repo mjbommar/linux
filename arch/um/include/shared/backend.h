@@ -43,10 +43,14 @@ struct um_memory_region;
 
 /*
  * Bumped on op signature changes. Adding new ops at the end of
- * struct um_backend_ops is source-compatible, but the dispatch macro does
- * not synthesize -ENOSYS for missing ops. All in-tree backends must
- * populate every required dispatch op; required ops are validated at
- * init by validate_required_ops() in arch/um/kernel/backend.c. See
+ * struct um_backend_ops is source-compatible and does not bump.
+ *
+ * The dispatch macro does not synthesize -ENOSYS for missing ops; it does
+ * not need to, because every op dispatched unconditionally through
+ * um_backend_dispatch() is validated non-NULL at init by
+ * validate_required_ops() in arch/um/kernel/backend.c (it panics naming
+ * the missing op). Ops that may legitimately be NULL (probe/init/shutdown,
+ * mm_region_protected, tlb_kick_others) are call-site NULL-checked. See
  * Documentation/virt/uml/backend-contract.rst.
  */
 #define UM_BACKEND_CONTRACT_VERSION  2u

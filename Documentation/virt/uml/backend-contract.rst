@@ -13,7 +13,30 @@ must implement: the function-pointer table ``struct um_backend_ops``
 declared in ``arch/um/include/shared/backend.h``.
 
 The contract version covered by this document is
-``UM_BACKEND_CONTRACT_VERSION = 1``.
+``UM_BACKEND_CONTRACT_VERSION = 2``.
+
+Version history
+===============
+
+- **v2** (current) - SMP-era signature changes: ``ipi_send`` and
+  ``set_timer`` take a per-CPU ``cpu`` argument, and ``set_timer``
+  takes an ``enum um_timer_mode``. The version is bumped because these
+  are *signature* changes, not additions. The optional
+  ``tlb_kick_others`` op (for backends with per-vCPU guest TLBs) was
+  added in the same era; pure additions do not by themselves bump the
+  version.
+- **v1** - initial single-CPU contract (6.16-era ``seccomp`` backend).
+
+The bump rule: adding a new op at the end of ``struct um_backend_ops``
+is source-compatible and does **not** bump the version; changing an
+existing op's signature does. Every op that is dispatched
+unconditionally through ``um_backend_dispatch()`` is validated non-NULL
+at boot by ``validate_required_ops()`` in ``arch/um/kernel/backend.c``
+(it panics naming the missing op), so a backend that omits a required
+op fails cleanly at init rather than NULL-dereferencing on first
+dispatch. Genuinely optional ops (``probe``/``init``/``shutdown``,
+``mm_region_protected``, ``tlb_kick_others``) may be NULL and are
+NULL-checked at their call sites.
 
 For end-user documentation (which backend to pick, the boot
 parameters, the trap-path diagrams), see

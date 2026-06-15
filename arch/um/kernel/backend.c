@@ -16,10 +16,12 @@
  * um_backend->kind == UM_BACKEND_KIND_SECCOMP. Both representations
  * of "which backend is active" are kept in sync from this point on.
  *
- * The validation at the top: every backend's required dispatch ops
- * must be non-NULL. Optional ops can be NULL, but a NULL optional op
- * still crashes if dispatched in dynamic mode; the dispatch macro does
- * not synthesize -ENOSYS. See backend-contract.rst.
+ * The validation at the top: every op dispatched unconditionally through
+ * um_backend_dispatch() is checked non-NULL at init (panicking with the
+ * offending op named), because the dispatch macro calls through the
+ * pointer directly and does not synthesize -ENOSYS. Ops that may
+ * legitimately be NULL are call-site NULL-checked instead. See
+ * backend-contract.rst.
  *
  * The ptrace backend is no longer built by this tree.
  */
@@ -32,11 +34,51 @@
 const struct um_backend_ops *um_backend;
 EXPORT_SYMBOL_GPL(um_backend);
 
+/*
+ * Every op that is dispatched unconditionally through
+ * um_backend_dispatch() must be non-NULL: the dispatch macro calls
+ * um_backend->op() directly and does not synthesize -ENOSYS, so a NULL
+ * here would fault on first dispatch (often deep in a HOT path with no
+ * useful context). Validate them all at init so a backend that omits one
+ * fails cleanly with the offending op named, instead of NULL-dereferencing
+ * later. Ops that may legitimately be NULL (probe/init/shutdown,
+ * mm_region_protected, tlb_kick_others) are call-site NULL-checked and are
+ * deliberately absent from this list. See backend-contract.rst.
+ */
 static void validate_required_ops(const struct um_backend_ops *ops)
 {
-	if (!ops->vcpu_run || !ops->mm_region_added || !ops->mm_region_removed ||
-	    !ops->context_switch || !ops->read_clock_ns)
-		panic("um: backend %s has NULL required op", ops->name);
+	static const struct {
+		const char *name;
+		unsigned int off;
+	} required[] = {
+#define UM_REQ_OP(field) { #field, offsetof(struct um_backend_ops, field) }
+		UM_REQ_OP(vcpu_run),
+		UM_REQ_OP(mm_create),
+		UM_REQ_OP(mm_destroy),
+		UM_REQ_OP(mm_region_added),
+		UM_REQ_OP(mm_region_removed),
+		UM_REQ_OP(thread_create),
+		UM_REQ_OP(thread_start_idle),
+		UM_REQ_OP(context_switch),
+		UM_REQ_OP(ipi_send),
+		UM_REQ_OP(read_clock_ns),
+		UM_REQ_OP(set_timer),
+		UM_REQ_OP(read_persistent_clock_ns),
+		UM_REQ_OP(init_thread_regs),
+		UM_REQ_OP(read_guest_regs),
+		UM_REQ_OP(write_guest_regs),
+#undef UM_REQ_OP
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(required); i++) {
+		const void *fn = *(void * const *)
+			((const char *)ops + required[i].off);
+
+		if (!fn)
+			panic("um: backend %s missing required dispatch op %s",
+			      ops->name, required[i].name);
+	}
 }
 
 /*
