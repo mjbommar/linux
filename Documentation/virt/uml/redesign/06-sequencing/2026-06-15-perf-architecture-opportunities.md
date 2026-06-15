@@ -195,6 +195,26 @@ step confirms it — diagnose before act.
 **P-series ranking:** P1 (everyone benefits) > P2 (fixes the kvm-v2 regression) >
 P4 (clean, broad) > P3 (helps P2) > P5 (confirm-first, likely noise).
 
+**Data-driven reprioritization (2026-06-15, after P1/P2/P5 profiling):** the
+measurements collapse the P-series to a single worthwhile perf optimization.
+- **P1-opt (spin-before-block on the stub futex) is the one high-value win.** P1
+  showed the futex -> `__schedule` round-trip is **19-35%** of the per-syscall
+  trap cost, and P2 showed kvm-v2 trades that same round-trip for an equal-weight
+  `KVM_RUN` vmexit. Reducing the per-syscall block/reschedule is the only change
+  that moves a large, measured cost. (Delicate hot-path work; gate on the contract
+  conformance suite + cpython parity.)
+- **P3 (lazy gadget refresh) and P4 (static_call) are DEPRIORITIZED by the
+  profiles.** Neither the per-`KVM_RUN` gadget refresh nor the contract
+  indirect-dispatch appears as a hot function in the P1/P2 `perf` traces — the cost
+  is the syscall round-trip (futex/vmexit), not the refresh or the indirect call.
+  Optimizing them would yield little while risking C2/C3 gadget correctness (P3) or
+  fighting the host/kernel TU split (P4). Diagnose-before-optimize: leave them.
+- **P2's threshold knob** is irrelevant for steady I/O (sweep was flat); kvm-v2's
+  trapping cost is structural.
+- **P5** dismissed (small, partly boot overhead).
+So the remaining *perf* work is P1-opt alone; the remaining *feature* work is
+vector2 (T2/T3/T4) and the T1b root-cause. Everything else is closed by data.
+
 ---
 
 ## T-series — test capability (unblocks F1/F3 here, no physical hardware)
