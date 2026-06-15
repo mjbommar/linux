@@ -335,8 +335,15 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   validated. The keep-list decision (raw + tap + fd + l2tpv3 + gre) and the
   sequencing (datapath parity -> legacy `vecN:` migration shim -> deprecate
   `UML_NET_VECTOR`) stand as the plan; legacy retirement is gated on vector2 parity
-  and on the user's specific security rationale for the cover story. The verifiable
-  part done here: vector2 unit/loopback health (see below).
+  and on the user's specific security rationale for the cover story.
+  **Verified here (2026-06-14):** vector2 is healthy on every axis measurable
+  without a NIC — all **98 KUnit tests pass** across 10 suites (config 12, queue 9,
+  transport 8, fake_host 10, model 7, cmdline 5, netdev 18, ethtool 6, host_fd 14,
+  host_tap 9), and the loopback datapath smokes pass: `vector2-inproc-tap-smoke`,
+  `vector2-fd-handoff-smoke`, and `vector2-fd-multiqueue-smoke` (4-queue fd handoff,
+  fds 200..203). So the existing tap/fd datapath and multiqueue handoff are sound;
+  what remains is the cross-host `raw`/`l2tpv3`/`gre` datapaths and the real-NIC
+  throughput + per-queue fairness numbers, which need lab hardware.
 
 ## Execution order
 
