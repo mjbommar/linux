@@ -181,6 +181,16 @@ step confirms it — diagnose before act.
 - **Acceptance:** either a confirmed+reduced jitter, or a "within noise" dismissal
   (don't chase noise — this is lowest priority).
 - **Effort:** S (confirm) then M. **Risk:** low; likely noise.
+- **Result (DONE, 2026-06-15):** a pure-compute binary (no syscalls in the hot
+  loop, ~3e9 iters) timed over the full UML run: kvm-v2 **2.29/2.31 s** vs seccomp
+  **2.22/2.22 s** — a **small (~3.5%) but consistent** overhead (tight
+  repeatability rules out noise). It is *not* a meaningful compute regression:
+  pure CPU is ~parity within a few percent, and the delta is dominated by kvm-v2's
+  higher boot/KVM setup (included in wall time) plus periodic timer-tick vmexits
+  during the loop. **Disposition: dismissed as not worth chasing** — the effect is
+  small and partly boot-overhead; no `__schedule`/vmexit hot-spot worth a fix.
+  (The original F2 "hash section noisy" signal is explained: a small real overhead
+  swamped by measurement noise in that mixed workload.)
 
 **P-series ranking:** P1 (everyone benefits) > P2 (fixes the kvm-v2 regression) >
 P4 (clean, broad) > P3 (helps P2) > P5 (confirm-first, likely noise).
