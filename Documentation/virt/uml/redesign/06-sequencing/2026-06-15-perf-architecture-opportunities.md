@@ -285,15 +285,31 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
   **vector2 transmit STALL on tap reuse**, not memory corruption — which is exactly
   why KASAN was clean and why slowing execution (strace) "fixed" it. My earlier
   "SEGV / use-after-free" write-up was wrong; corrected here.
-- **Root-cause direction (re-aimed):** a **lost TX wakeup / flow-control deadlock**
-  in the fd transport — sustained send fills the TX ring, the tap write hits EAGAIN
-  (host not draining), vector2 stops the queue, and the wakeup that should restart
-  it (epoll/IRQ re-arm on the fd, or `netif_wake_queue`) never fires when the tap
-  was previously attached+detached by another driver. Ping survives because it is
-  low-rate and never fills the ring. Next step is to instrument the TX
-  stop/wake path (`vector2_queue`/`vector2_netdev` TX flow control + the fd's
-  poll/epoll re-arm), **not** gdb/KASAN. Reliable repro: legacy `vector` then
-  `vector2` on the same tap, sustained TCP send.
+- **Hypothesis tested + REFUTED (missing TX-writable IRQ):** vector2 registers only
+  `IRQ_READ` on rx_fd and (unlike legacy vector's `vector_tx_interrupt`, an
+  `IRQ_WRITE` handler) has **no TX-writable IRQ** — its `tx_irq` is only ever freed,
+  never registered. That looked like the lost-wakeup cause, so I prototyped the
+  mirror (register `IRQ_WRITE` on tx_fd -> `napi_schedule`). It did **not** fix the
+  stall (sustained send still hung, `rc=124`) and the **host sink received zero
+  bytes**, so the TX path delivers *nothing* on the reused tap — not a
+  fills-then-cannot-recover case. Reverted (unvalidated). The missing TX IRQ is a
+  real latent gap worth closing on its own merits, but it is **not** this bug.
+- **Root-cause direction (re-aimed again):** `sink rx == 0` means vector2's TX
+  frames do not reach the host at all on a tap a prior driver detached from, while a
+  fresh tap works and ICMP/connect survive. That points at **host-side multi-queue
+  TAP state** after the legacy driver detaches its queue (a wedged/stale tx queue on
+  the tun device), or vector2's inherited tx_fd binding to a dead tap queue — not a
+  vector2 wakeup gap. Next step is **host-side inspection**: after the legacy run,
+  check the tun device's per-queue state (`ip -d link`, `/sys/class/net/<tap>/`),
+  whether the guest's writes to the inherited fd return success but the host tap
+  drops them, and whether re-attaching a fresh queue (vs the legacy-detached one) is
+  what the per-driver-fresh-tap fix actually exercises. Reliable repro unchanged:
+  legacy `vector` then `vector2` on the same tap, sustained TCP send (`rc=124`,
+  sink rx 0).
+- **Honest tally:** four root-cause hypotheses now tested and refuted by experiment
+  (vnet_hdr mismatch, GSO/SG, memory SEGV/UAF, missing TX-writable IRQ); one solid
+  reframe (it is a TX **stall**, not a crash). The next lead is host-tap-state, and
+  the mitigation (fresh tap per driver) already protects every consumer.
 - **Done this session (validated):** fixed the harness — `run_bench_iter()` now
   calls `setup_tap` per driver run, so the bench no longer reuses a tap across
   drivers; vector2 stops crashing and produces a real result instead of `MISSING`.
