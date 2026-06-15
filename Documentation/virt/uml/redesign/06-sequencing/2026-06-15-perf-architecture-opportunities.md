@@ -108,10 +108,22 @@ step confirms it — diagnose before act.
   found** (futex_wait->schedule->`__schedule` ~35%). So neither backend has a cheap
   trapping-syscall path; kvm-v2 trades the futex/scheduler round-trip for a
   `KVM_RUN` vmexit of similar weight, plus the ~9% SREGS overhead.
-- **Next (targeted):** the ~9% SREGS reload is the one clearly-tunable lever —
-  sweep `KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD` (1/3/8/16/off) and measure the
-  fs-loop wall + `__set_sregs` share, gated on the TLB/mm selftests. The larger
-  `KVM_RUN`-vmexit cost is structural and not cheaply reducible.
+- **Threshold sweep (DONE, 2026-06-15):** swept
+  `KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD` = 1/3/8/16 on the fs loop. Wall time is
+  **flat** (32.85 / 32.63 / 32.49 / 32.51 s, <1% spread) — the knob does **not**
+  help this workload. That refines the attribution: the ~9% SREGS cost on a
+  single-task fs load is the **per-entry `sync_regs`** (cr3/fs.base/gs.base synced
+  every `KVM_RUN`), not the threshold-gated `prev_roots` full reload, which only
+  fires on TLB-generation changes that a single-task/single-mm workload rarely
+  triggers. So the threshold matters only for **mm-churning** (fork/exec-heavy)
+  loads, not steady fs I/O.
+- **Conclusion:** kvm-v2's fs/socket cost is **structural** — the `KVM_RUN` vmexit
+  plus the unavoidable per-entry SREGS sync — not a cheaply-tunable regression. This
+  reinforces F2/A1: kvm-v2 is a feature backend (isolation/snapshot/replay), not a
+  perf backend, and its trapping-syscall cost is inherent to running the guest in a
+  KVM VM. The threshold sweep is worth repeating on a fork/exec-heavy load (where
+  `prev_roots` drops actually fire) if that workload class ever matters; for steady
+  I/O there is no easy win here.
 
 ### P3. Make the gadget state-page refresh lazy (KVM_RUN hot path)
 
