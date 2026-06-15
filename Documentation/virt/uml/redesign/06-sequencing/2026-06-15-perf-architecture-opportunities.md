@@ -259,8 +259,22 @@ rate* (10/40/100G) and NIC-offload-specific behavior are genuinely hardware-boun
 - **Method:** during T1/T2 runs, `perf stat` the host UML process; count
   sendmmsg/recvmmsg and softirq time; report Mbit/s **and** CPU-cycles/Gbit for
   vector vs vector2.
-- **Acceptance:** a CPU-per-Gbit comparison accompanying every throughput number.
-- **Effort:** S. **Risk:** low.
+- **Attempt + methodology finding (2026-06-15):** a first cut (`perf stat -e cycles`
+  over a fixed-*time* 12 s send) is **invalid** and must not be reported as a CPU
+  metric: both drivers burned ~58.6 G cycles regardless of bytes moved, because the
+  UML host process runs flat-out for the whole wall-clock window. That makes naive
+  "cycles/Gbit" just inverse-throughput (vector 0.36 vs vector2 2.17 G-cyc/Gbit only
+  reflected 13.7 vs 2.2 Gbit/s), not per-byte work. Two fixes required for a valid
+  number: (1) a **fixed-bytes** workload (send exactly N GB, measure cycles to move
+  it), and (2) configure vector2 with **production offload** (`gso=1` +
+  `IFF_VNET_HDR`+`TUNSETOFFLOAD`) — the manual fd setup used here did not engage GSO,
+  so vector2 only reached 2.2 Gbit/s vs its real 39 Gbit/s on the umlctl path.
+  Throughput parity itself is already established by T1 (0.992x); T5's CPU
+  efficiency needs the corrected harness.
+- **Acceptance:** a CPU-per-Gbit comparison from a fixed-bytes run with both drivers
+  offload-on, accompanying every throughput number.
+- **Effort:** S (redo with fixed-bytes + offload). **Risk:** low. **Lesson:** never
+  derive a per-work CPU metric from a fixed-wall-time run of an always-busy process.
 
 **Genuinely hardware-bound (out of scope here, needs a lab NIC):** absolute
 line-rate at 10/40/100G, hardware offload (GRO/GSO/checksum) interaction, and
