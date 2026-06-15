@@ -263,6 +263,13 @@ Execution order (dependencies respected): **C1, A3** (quick, concrete) →
   clock observation only fires on time-travel advances). Fixed by gating the
   gadget off when `time_travel_mode != TT_MODE_OFF`; verified the gate fires only
   under time-travel. Identity syscalls are time-invariant (feeds into C3).
+- **C3 — DONE** (`ab1d5eb1ca6a`): audit confirms the allowlist is observationally
+  equivalent (identity syscalls refreshed from `current` before each KVM_RUN via
+  the trapped path's accessors; getcpu per-vCPU; clock is vvar-style with a
+  bounded staleness budget). Non-deterministic cases are covered by two
+  complementary mechanisms: the pre-existing `OFF_RECORD` bypass (record/replay)
+  and C2's new time-travel gate. No bug; documented the rationale next to the
+  gadget body.
 
 ## Execution order
 
