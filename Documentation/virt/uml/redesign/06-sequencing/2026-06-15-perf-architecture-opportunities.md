@@ -59,14 +59,24 @@ step confirms it — diagnose before act.
   So the single largest reducible component is the **per-syscall
   block -> reschedule -> wake** round-trip between the UML kernel thread and the
   stub (`__schedule` alone is ~16%).
-- **Optimization direction (next):** avoid paying a full host context switch when
-  the stub will respond almost immediately — e.g. a bounded **spin-before-block**
-  on the futex (adaptive, like `MUTEX_SPIN_ON_OWNER`), and/or co-schedule the UML
-  kernel thread and its stub on sibling CPUs so the handoff does not go through
-  `__schedule`. Prototype the spin-then-block first (smallest change), measure
-  cyc/getpid on the `bench` micro tier, and gate correctness on the contract
-  conformance suite + cpython parity. Caveat: spinning trades CPU for latency, so
-  bound it and confirm it does not regress the SMP/many-thread cases.
+- **Optimization attempt (DONE, 2026-06-15) — spin-before-block REFUTED:**
+  prototyped a bounded spin (1000 iters) reading `data->futex` before `FUTEX_WAIT`
+  in `wait_stub_child_futex()`. Measured cyc/getpid = **35,119 vs 35,823 baseline =
+  ~2%, within noise** -> no improvement; reverted. **Why it fails:** when the UML
+  kernel thread and the stub child share a CPU, spinning *starves* the stub — the
+  `FUTEX_WAIT` -> `__schedule` is precisely what yields the CPU so the stub can run
+  and service the syscall. So the spinner just burns its own quantum; the stub is
+  still not done after the spin and it falls through to `FUTEX_WAIT` anyway (a
+  larger spin would make it worse, not better). The `schedule` cost is not waste —
+  it is the handoff.
+- **Real lever (the harder half):** co-schedule the UML kernel thread and its stub
+  on **separate** CPUs (CPU affinity / sibling-core pinning) so the futex handoff
+  does not require descheduling the waiter. That removes the contention the spin
+  ran into, but it is a much larger change (affinity management, interaction with
+  the UML SMP vCPU model and the host scheduler) and must be measured against the
+  many-thread / oversubscribed cases. Deferred as a substantial, separate effort.
+  Lesson: the per-syscall `schedule` is a *handoff*, not pure overhead — you cannot
+  spin it away on a shared CPU; you have to remove the CPU contention.
 
 ### P2. kvm-v2 fs/socket regression: TLB-sync / per-mm-worker cost
 
@@ -197,12 +207,13 @@ P4 (clean, broad) > P3 (helps P2) > P5 (confirm-first, likely noise).
 
 **Data-driven reprioritization (2026-06-15, after P1/P2/P5 profiling):** the
 measurements collapse the P-series to a single worthwhile perf optimization.
-- **P1-opt (spin-before-block on the stub futex) is the one high-value win.** P1
-  showed the futex -> `__schedule` round-trip is **19-35%** of the per-syscall
-  trap cost, and P2 showed kvm-v2 trades that same round-trip for an equal-weight
-  `KVM_RUN` vmexit. Reducing the per-syscall block/reschedule is the only change
-  that moves a large, measured cost. (Delicate hot-path work; gate on the contract
-  conformance suite + cpython parity.)
+- **P1-opt: the futex->`__schedule` round-trip (19-35%) is the only large
+  reducible cost, BUT the simple fix (spin-before-block) was tried and REFUTED**
+  (measured ~2%/noise; the spin starves the stub on a shared CPU — the schedule is
+  the handoff, not waste). The remaining lever is **co-scheduling the UML kernel
+  thread and its stub on separate CPUs**, a substantial change (affinity + SMP/host
+  scheduler interaction), deferred. So even the one perf hotspot has no cheap fix;
+  the round-trip cost is largely structural to the trap-from-a-host-process model.
 - **P3 (lazy gadget refresh) and P4 (static_call) are DEPRIORITIZED by the
   profiles.** Neither the per-`KVM_RUN` gadget refresh nor the contract
   indirect-dispatch appears as a hot function in the P1/P2 `perf` traces — the cost
