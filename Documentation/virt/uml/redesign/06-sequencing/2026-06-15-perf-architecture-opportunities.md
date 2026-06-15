@@ -46,6 +46,27 @@ step confirms it — diagnose before act.
   the 9.4 us goes is itself valuable).
 - **Effort:** M (profiling) + M–L (any fix). **Risk:** medium — it is the hot
   trap path; correctness must be gated by the full suite.
+- **Attribution (DONE, 2026-06-15):** `perf record -g` on the UML host process
+  during a sustained `SYS_getpid` loop (seccomp backend). The cost is dominated by
+  the **futex handoff + host scheduler**, not signal machinery:
+  - ~51% in host syscalls the UML kernel issues per trap (`do_syscall_64`):
+    - **`futex` 24.6%** -> `futex_wait` 19.0% -> **`__schedule` 15.4%** (dequeue_task
+      / try_to_block_task / pick_next): the UML kernel thread **blocks on a futex
+      and the host runs a full context switch on every guest syscall**.
+    - `futex_wake` 5.1% (waking the stub child) -> `try_to_wake_up`.
+    - `rt_sigreturn` / `restore_sigcontext` 5.4% (returning from the SIGSYS handler).
+  - The rest (<1.5% each) is signal entry, the seccomp BPF filter, and dispatch.
+  So the single largest reducible component is the **per-syscall
+  block -> reschedule -> wake** round-trip between the UML kernel thread and the
+  stub (`__schedule` alone is ~16%).
+- **Optimization direction (next):** avoid paying a full host context switch when
+  the stub will respond almost immediately — e.g. a bounded **spin-before-block**
+  on the futex (adaptive, like `MUTEX_SPIN_ON_OWNER`), and/or co-schedule the UML
+  kernel thread and its stub on sibling CPUs so the handoff does not go through
+  `__schedule`. Prototype the spin-then-block first (smallest change), measure
+  cyc/getpid on the `bench` micro tier, and gate correctness on the contract
+  conformance suite + cpython parity. Caveat: spinning trades CPU for latency, so
+  bound it and confirm it does not regress the SMP/many-thread cases.
 
 ### P2. kvm-v2 fs/socket regression: TLB-sync / per-mm-worker cost
 
