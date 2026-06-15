@@ -28,6 +28,39 @@
  * never executes these bytes; only the guest does after memcpy. This also
  * keeps objtool from treating them as host kernel code, where
  * swapgs/sysretq/outb-to-magic-port would be invalid.
+ *
+ * Observational equivalence of the in-guest allowlist
+ * ---------------------------------------------------
+ * Each gadget-serviced syscall must return what the trapped path would,
+ * or it is a correctness bug. Audit:
+ *
+ *  - getpid/gettid/getppid/getuid/geteuid/getgid/getegid: read fields the
+ *    host refreshes into the per-vCPU state page before every KVM_RUN
+ *    (kvm_v2_refresh_gadget_identity()), using the SAME accessors the
+ *    trapped path uses (task_tgid_vnr(), current_cred() munged through
+ *    current_user_ns()). These values change only via syscalls that are
+ *    NOT in this allowlist (fork/exec, setuid/setgid, ...), which trap and
+ *    so force a refresh on the next entry. Equivalent.
+ *  - getcpu: returns this vCPU's id from its own state page; racy to the
+ *    same degree as the native syscall. Equivalent.
+ *  - time/clock_gettime(CLOCK_MONOTONIC): vvar-style read of a cached
+ *    ktime_get_ns() with a bounded staleness budget (OFF_BUDGET, refilled
+ *    to KVM_V2_VVAR_BUDGET_INITIAL each refresh; on exhaustion the gadget
+ *    falls back to trap). Equivalent to a vDSO read in normal operation.
+ *
+ * The two clock syscalls are NOT deterministic when time must be
+ * controlled, so the gadget is suppressed in those modes:
+ *  - record/replay: OFF_RECORD is set on every vCPU page while a recording
+ *    or replay is active (kvm_v2_record_set_gadget_bypass()), and the first
+ *    instruction below forces the fallback when it is non-zero, so every
+ *    syscall traps and is counted/ordered consistently.
+ *  - time-travel: the gadget is not installed at all when
+ *    time_travel_mode != TT_MODE_OFF (see
+ *    kvm_v2_exception_maybe_upgrade_gadget()); the 5-byte fallback stays so
+ *    clock reads go through the deterministic read_clock_ns path.
+ * These two cover the complementary cases: OFF_RECORD only triggers while
+ * record/replay is armed; the time-travel gate covers plain time-travel
+ * with no recording.
  */
 
 #include <linux/linkage.h>
