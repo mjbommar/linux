@@ -47,13 +47,30 @@ and (b) fewer crossings.
 
 ### Tier 1 — measured / high-confidence (UML side)
 
-**O1. Stop resyncing FS/GS on every trap (`arch_prctl` GET ×2).** *Measured
-−8.9%.* `stub_signal_interrupt` unconditionally does `ARCH_GET_FS`+`ARCH_GET_GS`
-each trap (`kernel/skas/stub.c`). Correct fix: dirty-track guest TLS and re-read
-only after a TLS-changing operation, instead of every syscall. **Confirm first**
-which path guest TLS sets actually take (trapped arch_prctl vs host passthrough);
-the GET is only removable for the path UML can observe. *Effort S–M; risk
-low–med — gate on TLS/`set_thread_area` selftests + cpython parity.*
+**O1. Single-thread-mm fast path for the FS/GS resync (`arch_prctl` GET ×2).**
+*Measured −8.9%; correctness constraint fully characterized by test (below).*
+`stub_signal_interrupt` unconditionally does `ARCH_GET_FS`+`ARCH_GET_GS` each
+trap (`kernel/skas/stub.c:130-133`) to keep UML's per-thread saved FS/GS
+accurate (`arch/x86/um/os-Linux/mcontext.c:195,266-271`). The GET defends the
+**untrappable** `wrfsbase`/`wrgsbase` path (FSGSBASE), so it cannot be dirty-
+tracked (no trap to hook) — my first instinct was wrong. **Correct fix: gate the
+GET on whether UML is multiplexing >1 thread on this mm/stub.** A single-threaded
+mm has no other thread to clobber, so the GET is pure overhead there; capture
+FS/GS on demand only when UML genuinely needs it (context switch, signal frame,
+ptrace, coredump — all rare). Recovers the full ~9% for single-threaded
+processes (cpython's process-parallel regrtest workers, most CLI tools) with
+zero correctness loss; multi-threaded mms keep the per-trap GET. *Effort S–M;
+risk low — gate on the MT wrfsbase test + cpython parity.*
+
+> **Validation (2026-06-18).** Built baseline + GET-skipped kernels from the
+> same tree. (a) getpid: 31,958→29,104 cyc, **−8.9%**, 4 reps no overlap.
+> (b) 32-thread pthread `__thread` test: PASS on both (glibc TLS uses the
+> *trapped* arch_prctl, which UML observes). (c) single-thread `wrfsbase`
+> across a syscall: SURVIVED on both (UML doesn't rewrite FS it thinks is
+> unchanged). (d) **4×`CLONE_THREAD` + `wrfsbase` across context switches:
+> baseline `clob=[0,0,0,0]` CLEAN; GET-skipped `clob=[402,399,367,386]`
+> CLOBBERED.** (d) is the load-bearing case and the exact boundary the
+> single-thread gate must respect.
 
 **O2. Coalesce the futex WAKE+WAIT pair on each side.** Both stub
 (`stub.c:139/144`) and kernel (`os-Linux/skas/process.c:90/110`) issue a separate
@@ -126,7 +143,10 @@ med; high ceiling for specific workloads, niche otherwise.*
 3. **O7** (gadget expansion) and **O8** (lazy state) — structural, medium.
 4. **O5/O6/O9** — substrate cleanups; **O10** only for syscall-bound workloads.
 
-**Discipline note:** O1 is an *upper-bound* (the experiment skipped correctness);
-the production patch must restore TLS correctness and be re-measured. Nothing
-here is committed as a fix before its measurement step confirms it — and the
-affinity lever was killed by measurement, not argument.
+**Discipline note:** O1's −8.9% was measured with correctness skipped, but the
+correctness boundary is now *characterized by test* (the MT-`wrfsbase` clobber),
+so the production patch has a concrete, testable target — the single-thread-mm
+gate — rather than a hand-wave. Two initial instincts were killed by
+measurement: the affinity lever (1 CPU beats 2) and the "dirty-track TLS" idea
+for O1 (`wrfsbase` is untrappable). Nothing is committed as a fix before its
+measurement step confirms it.
