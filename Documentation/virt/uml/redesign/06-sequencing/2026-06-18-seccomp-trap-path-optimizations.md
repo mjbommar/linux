@@ -71,6 +71,21 @@ risk low — gate on the MT wrfsbase test + cpython parity.*
 > baseline `clob=[0,0,0,0]` CLEAN; GET-skipped `clob=[402,399,367,386]`
 > CLOBBERED.** (d) is the load-bearing case and the exact boundary the
 > single-thread gate must respect.
+>
+> **Real-workload impact (2026-06-18) — the −8.9% does NOT translate.**
+> cpython-test curated (single-threaded regrtest workers, so GET-skip is
+> correctness-equivalent to the gate) on baseline vs GET-skipped: **33.1 vs
+> 33.1 s, 32.9 vs 32.5 s — within noise (<1%)**, while the same GET-skip
+> build shows the −8.9% on getpid. The microbench win is on a *do-nothing*
+> syscall; on a real workload the ~755 ns/trap saving is a slice of a slice
+> (the trap is only part of total time — interpreter compute, real host I/O,
+> and idle dominate — and arch_prctl is only ~9% of the trap vs the futex
+> handoff's ~48%). **O1 is a correct, low-risk per-syscall reduction, but not
+> a workload-level lever.** It matters only for syscall-storm-dominated
+> single-threaded workloads, a narrow class. This reinforces P1: the trap
+> cost is structural; the only workload-level lever is the futex handoff
+> itself (O4) or fewer crossings (O10), not micro-opts on the trap's edges
+> (O1/O2/O9 — bankable and correct, but invisible on a stopwatch).
 
 **O2. Coalesce the futex WAKE+WAIT pair on each side.** Both stub
 (`stub.c:139/144`) and kernel (`os-Linux/skas/process.c:90/110`) issue a separate
