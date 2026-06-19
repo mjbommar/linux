@@ -68,6 +68,24 @@ struct stub_data {
 	/* seccomp architecture specific state restore */
 	struct stub_data_arch arch_data;
 
+	/*
+	 * Clock gadget (seccomp): when nonzero, the stub answers
+	 * clock_gettime(CLOCK_MONOTONIC) in-place as
+	 *   guest_mono = host_CLOCK_MONOTONIC - clock_mono_offset
+	 * skipping the futex handoff. UML stamps the offset
+	 * (os_nsecs() - ktime_get_ns()) on a crossing clock_gettime, and only
+	 * when NOT in time-travel mode (so the gadget is implicitly disabled
+	 * for virtual time). The guest clocksource IS host CLOCK_MONOTONIC, so
+	 * the offset is the constant host-uptime-at-guest-boot.
+	 *
+	 * clock_real_offset does the same for CLOCK_REALTIME. REALTIME can be
+	 * stepped (settimeofday/NTP/suspend), so a stamped-once offset is only
+	 * exact until the guest's wall clock is adjusted; a production version
+	 * should re-stamp on a budget. MONOTONIC never jumps and is exact.
+	 */
+	long long clock_mono_offset;
+	long long clock_real_offset;
+
 	/* Stack for signal handlers and stub syscall execution. */
 	unsigned char sigstack[UM_KERN_PAGE_SIZE] __aligned(UM_KERN_PAGE_SIZE);
 };

@@ -14,6 +14,11 @@
 #include <asm/um-hooks.h>
 #include <asm/unistd.h>
 #include <asm/delay.h>
+#include <linux/timekeeping.h>
+#include <os.h>
+#include <skas/skas.h>
+#include <stub-data.h>
+#include <backend.h>
 
 void handle_syscall(struct uml_pt_regs *r)
 {
@@ -56,6 +61,29 @@ void handle_syscall(struct uml_pt_regs *r)
 						 UPT_SYSCALL_ARG6(&regs->regs));
 
 		PT_REGS_SET_SYSCALL_RETURN(regs, ret);
+
+		/*
+		 * Stamp the clock-gadget offset so the stub can answer
+		 * clock_gettime(CLOCK_MONOTONIC) without a handoff. The guest
+		 * clocksource is host CLOCK_MONOTONIC, so the offset is constant.
+		 * Only when NOT in time-travel mode (the gadget must not bypass
+		 * virtual time), and only for the futex (seccomp) backend.
+		 */
+		if (syscall == __NR_clock_gettime &&
+		    time_travel_mode == TT_MODE_OFF &&
+		    um_backend->stub_syscall_uses_futex) {
+			struct mm_id *mm = current_mm_id();
+
+			if (mm && mm->stack) {
+				struct stub_data *sd = (struct stub_data *)mm->stack;
+
+				sd->clock_mono_offset =
+					(long long)os_nsecs() - (long long)ktime_get_ns();
+				sd->clock_real_offset =
+					(long long)os_persistent_clock_emulation() -
+					(long long)ktime_get_real_ns();
+			}
+		}
 
 		/*
 		 * An error value here can be some form of -ERESTARTSYS

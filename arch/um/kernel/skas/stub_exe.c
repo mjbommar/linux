@@ -177,16 +177,18 @@ static void stub_install_seccomp_filter(const struct stub_init_data *init_data)
 			 offsetof(struct seccomp_data, nr)),
 
 		/* [10-16] Check against permitted syscalls */
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex, 7, 0),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 6, 0),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 5, 0),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_MMAP_NR, 4, 0),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap, 3, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex, 8, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 7, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 6, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_MMAP_NR, 5, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap, 4, 0),
 #ifdef __i386__
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_thread_area, 2, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_thread_area, 3, 0),
 #else
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 2, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 3, 0),
 #endif
+		/* Clock gadget: allow the stub to read the host clock directly. */
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clock_gettime, 2, 0),
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rt_sigreturn, 1, 0),
 
 		/* [17] Not one of the permitted syscalls */

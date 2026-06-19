@@ -8,6 +8,7 @@
 #include <linux/futex.h>
 #include <linux/stringify.h>
 #include <sys/socket.h>
+#include <sys/ucontext.h>
 #include <errno.h>
 
 /*
@@ -114,6 +115,43 @@ stub_signal_interrupt(int sig, siginfo_t *info, void *p)
 	int *fd_map;
 	int num_fds;
 	long res;
+
+	/*
+	 * Clock gadget fast path: answer clock_gettime(CLOCK_MONOTONIC) in the
+	 * stub, skipping the futex handoff. The guest clocksource is the host
+	 * CLOCK_MONOTONIC, so guest_mono = host_mono - clock_mono_offset (a
+	 * constant UML stamps; only set when not in time-travel mode). The
+	 * SECCOMP_RET_TRAP saved RIP is past the syscall, so writing the result
+	 * + returning (-> rt_sigreturn) resumes the guest exactly as the full
+	 * path would.
+	 */
+	if (sig == SIGSYS &&
+	    uc->uc_mcontext.gregs[REG_RAX] == __NR_clock_gettime) {
+		long clk = uc->uc_mcontext.gregs[REG_RDI];
+		long long off = 0;
+
+		if (clk == 1 /* CLOCK_MONOTONIC */)
+			off = d->clock_mono_offset;
+		else if (clk == 0 /* CLOCK_REALTIME */)
+			off = d->clock_real_offset;
+
+		if (off) {
+			long *gts = (long *)uc->uc_mcontext.gregs[REG_RSI];
+			/* Host writes its clock into the guest's timespec. */
+			long r = stub_syscall2(__NR_clock_gettime, clk,
+					       (unsigned long)gts);
+
+			if (r == 0) {
+				long long ns = (long long)gts[0] * 1000000000LL +
+					       gts[1] - off;
+
+				gts[0] = ns / 1000000000LL;
+				gts[1] = ns % 1000000000LL;
+			}
+			uc->uc_mcontext.gregs[REG_RAX] = r;
+			return;
+		}
+	}
 
 	d->signal = sig;
 	d->si_offset = (unsigned long)info - (unsigned long)&d->sigstack[0];
