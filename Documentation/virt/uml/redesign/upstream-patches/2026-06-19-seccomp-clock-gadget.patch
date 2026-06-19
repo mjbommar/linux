@@ -1,0 +1,161 @@
+diff --git a/arch/um/include/shared/skas/stub-data.h b/arch/um/include/shared/skas/stub-data.h
+index d1d81f5e6af8..02269fcd431f 100644
+--- a/arch/um/include/shared/skas/stub-data.h
++++ b/arch/um/include/shared/skas/stub-data.h
+@@ -68,6 +68,24 @@ struct stub_data {
+ 	/* seccomp architecture specific state restore */
+ 	struct stub_data_arch arch_data;
+ 
++	/*
++	 * Clock gadget (seccomp): when nonzero, the stub answers
++	 * clock_gettime(CLOCK_MONOTONIC) in-place as
++	 *   guest_mono = host_CLOCK_MONOTONIC - clock_mono_offset
++	 * skipping the futex handoff. UML stamps the offset
++	 * (os_nsecs() - ktime_get_ns()) on a crossing clock_gettime, and only
++	 * when NOT in time-travel mode (so the gadget is implicitly disabled
++	 * for virtual time). The guest clocksource IS host CLOCK_MONOTONIC, so
++	 * the offset is the constant host-uptime-at-guest-boot.
++	 *
++	 * clock_real_offset does the same for CLOCK_REALTIME. REALTIME can be
++	 * stepped (settimeofday/NTP/suspend), so a stamped-once offset is only
++	 * exact until the guest's wall clock is adjusted; a production version
++	 * should re-stamp on a budget. MONOTONIC never jumps and is exact.
++	 */
++	long long clock_mono_offset;
++	long long clock_real_offset;
++
+ 	/* Stack for signal handlers and stub syscall execution. */
+ 	unsigned char sigstack[UM_KERN_PAGE_SIZE] __aligned(UM_KERN_PAGE_SIZE);
+ };
+diff --git a/arch/um/kernel/skas/stub.c b/arch/um/kernel/skas/stub.c
+index bf2aeca80b02..c39d76c064e3 100644
+--- a/arch/um/kernel/skas/stub.c
++++ b/arch/um/kernel/skas/stub.c
+@@ -8,6 +8,7 @@
+ #include <linux/futex.h>
+ #include <linux/stringify.h>
+ #include <sys/socket.h>
++#include <sys/ucontext.h>
+ #include <errno.h>
+ 
+ /*
+@@ -115,6 +116,43 @@ stub_signal_interrupt(int sig, siginfo_t *info, void *p)
+ 	int num_fds;
+ 	long res;
+ 
++	/*
++	 * Clock gadget fast path: answer clock_gettime(CLOCK_MONOTONIC) in the
++	 * stub, skipping the futex handoff. The guest clocksource is the host
++	 * CLOCK_MONOTONIC, so guest_mono = host_mono - clock_mono_offset (a
++	 * constant UML stamps; only set when not in time-travel mode). The
++	 * SECCOMP_RET_TRAP saved RIP is past the syscall, so writing the result
++	 * + returning (-> rt_sigreturn) resumes the guest exactly as the full
++	 * path would.
++	 */
++	if (sig == SIGSYS &&
++	    uc->uc_mcontext.gregs[REG_RAX] == __NR_clock_gettime) {
++		long clk = uc->uc_mcontext.gregs[REG_RDI];
++		long long off = 0;
++
++		if (clk == 1 /* CLOCK_MONOTONIC */)
++			off = d->clock_mono_offset;
++		else if (clk == 0 /* CLOCK_REALTIME */)
++			off = d->clock_real_offset;
++
++		if (off) {
++			long *gts = (long *)uc->uc_mcontext.gregs[REG_RSI];
++			/* Host writes its clock into the guest's timespec. */
++			long r = stub_syscall2(__NR_clock_gettime, clk,
++					       (unsigned long)gts);
++
++			if (r == 0) {
++				long long ns = (long long)gts[0] * 1000000000LL +
++					       gts[1] - off;
++
++				gts[0] = ns / 1000000000LL;
++				gts[1] = ns % 1000000000LL;
++			}
++			uc->uc_mcontext.gregs[REG_RAX] = r;
++			return;
++		}
++	}
++
+ 	d->signal = sig;
+ 	d->si_offset = (unsigned long)info - (unsigned long)&d->sigstack[0];
+ 	d->mctx_offset = (unsigned long)&uc->uc_mcontext - (unsigned long)&d->sigstack[0];
+diff --git a/arch/um/kernel/skas/stub_exe.c b/arch/um/kernel/skas/stub_exe.c
+index ebc1b0487e86..d52ce903e6ec 100644
+--- a/arch/um/kernel/skas/stub_exe.c
++++ b/arch/um/kernel/skas/stub_exe.c
+@@ -177,16 +177,18 @@ static void stub_install_seccomp_filter(const struct stub_init_data *init_data)
+ 			 offsetof(struct seccomp_data, nr)),
+ 
+ 		/* [10-16] Check against permitted syscalls */
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex, 7, 0),
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 6, 0),
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 5, 0),
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_MMAP_NR, 4, 0),
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap, 3, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex, 8, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 7, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 6, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_MMAP_NR, 5, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap, 4, 0),
+ #ifdef __i386__
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_thread_area, 2, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_thread_area, 3, 0),
+ #else
+-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 2, 0),
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 3, 0),
+ #endif
++		/* Clock gadget: allow the stub to read the host clock directly. */
++		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clock_gettime, 2, 0),
+ 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rt_sigreturn, 1, 0),
+ 
+ 		/* [17] Not one of the permitted syscalls */
+diff --git a/arch/um/kernel/skas/syscall.c b/arch/um/kernel/skas/syscall.c
+index 7fd0daf9a37d..99cb8188314c 100644
+--- a/arch/um/kernel/skas/syscall.c
++++ b/arch/um/kernel/skas/syscall.c
+@@ -14,6 +14,11 @@
+ #include <asm/um-hooks.h>
+ #include <asm/unistd.h>
+ #include <asm/delay.h>
++#include <linux/timekeeping.h>
++#include <os.h>
++#include <skas/skas.h>
++#include <stub-data.h>
++#include <backend.h>
+ 
+ void handle_syscall(struct uml_pt_regs *r)
+ {
+@@ -57,6 +62,29 @@ void handle_syscall(struct uml_pt_regs *r)
+ 
+ 		PT_REGS_SET_SYSCALL_RETURN(regs, ret);
+ 
++		/*
++		 * Stamp the clock-gadget offset so the stub can answer
++		 * clock_gettime(CLOCK_MONOTONIC) without a handoff. The guest
++		 * clocksource is host CLOCK_MONOTONIC, so the offset is constant.
++		 * Only when NOT in time-travel mode (the gadget must not bypass
++		 * virtual time), and only for the futex (seccomp) backend.
++		 */
++		if (syscall == __NR_clock_gettime &&
++		    time_travel_mode == TT_MODE_OFF &&
++		    um_backend->stub_syscall_uses_futex) {
++			struct mm_id *mm = current_mm_id();
++
++			if (mm && mm->stack) {
++				struct stub_data *sd = (struct stub_data *)mm->stack;
++
++				sd->clock_mono_offset =
++					(long long)os_nsecs() - (long long)ktime_get_ns();
++				sd->clock_real_offset =
++					(long long)os_persistent_clock_emulation() -
++					(long long)ktime_get_real_ns();
++			}
++		}
++
+ 		/*
+ 		 * An error value here can be some form of -ERESTARTSYS
+ 		 * and then we'd just loop. Make any error syscalls take
