@@ -798,6 +798,10 @@ void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
 	local_irq_save(flags);
 	do_IRQ(TIMER_IRQ, regs);
 	local_irq_restore(flags);
+
+	/* Publish coarse time into the vDSO data page (real time only). */
+	if (time_travel_mode == TT_MODE_OFF)
+		um_vdso_update_coarse();
 }
 
 /*

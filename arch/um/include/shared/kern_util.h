@@ -68,4 +68,6 @@ void um_idle_sleep(void);
 
 void kasan_map_memory(void *start, size_t len);
 
+void um_vdso_update_coarse(void);
+
 #endif
