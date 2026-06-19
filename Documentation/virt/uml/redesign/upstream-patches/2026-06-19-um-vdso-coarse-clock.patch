@@ -1,0 +1,186 @@
+diff --git a/arch/um/kernel/time.c b/arch/um/kernel/time.c
+index da4ef8b5e7dc..e85a9191c915 100644
+--- a/arch/um/kernel/time.c
++++ b/arch/um/kernel/time.c
+@@ -28,6 +28,9 @@
+ #include <linux/um_timetravel.h>
+ #include <shared/init.h>
+ 
++/* vDSO coarse-time publisher (arch/x86/um/vdso/vma.c). */
++void __weak um_vdso_update_coarse(void) { }
++
+ #ifdef CONFIG_UML_TIME_TRAVEL_SUPPORT
+ #include <linux/sched/clock.h>
+ 
+@@ -798,6 +801,10 @@ void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs)
+ 	local_irq_save(flags);
+ 	do_IRQ(TIMER_IRQ, regs);
+ 	local_irq_restore(flags);
++
++	/* Publish coarse time into the vDSO data page (real time only). */
++	if (time_travel_mode == TT_MODE_OFF)
++		um_vdso_update_coarse();
+ }
+ 
+ /*
+diff --git a/arch/x86/um/vdso/um_vdso.c b/arch/x86/um/vdso/um_vdso.c
+index ca1468865b14..4cb88e1809f3 100644
+--- a/arch/x86/um/vdso/um_vdso.c
++++ b/arch/x86/um/vdso/um_vdso.c
+@@ -12,11 +12,47 @@
+ #include <vdso/gettime.h>
+ #include <linux/time.h>
+ #include <asm/unistd.h>
++#include "um_vdso.h"
++
++#define UM_CLOCK_REALTIME_COARSE	5
++#define UM_CLOCK_MONOTONIC_COARSE	6
++#define UM_PAGE_SIZE			4096UL
++
++/* The data page sits immediately below the (single) vDSO code page. */
++static inline struct um_vdso_data *um_get_vdso_data(void)
++{
++	unsigned long rip;
++
++	__asm__("lea 0(%%rip), %0" : "=r" (rip));
++	return (struct um_vdso_data *)((rip & ~(UM_PAGE_SIZE - 1)) - UM_PAGE_SIZE);
++}
+ 
+ int __vdso_clock_gettime(clockid_t clock, struct __kernel_timespec *ts)
+ {
++	struct um_vdso_data *vd = um_get_vdso_data();
+ 	long ret;
+ 
++	/* Coarse clocks: read the per-tick snapshot with no syscall/trap. */
++	if ((clock == UM_CLOCK_MONOTONIC_COARSE ||
++	     clock == UM_CLOCK_REALTIME_COARSE) &&
++	    *(volatile unsigned int *)&vd->valid) {
++		unsigned int seq;
++
++		do {
++			seq = *(volatile unsigned int *)&vd->seq;
++			if (seq & 1)
++				continue;
++			if (clock == UM_CLOCK_MONOTONIC_COARSE) {
++				ts->tv_sec  = vd->mono_coarse_sec;
++				ts->tv_nsec = vd->mono_coarse_nsec;
++			} else {
++				ts->tv_sec  = vd->real_coarse_sec;
++				ts->tv_nsec = vd->real_coarse_nsec;
++			}
++		} while (seq != *(volatile unsigned int *)&vd->seq);
++		return 0;
++	}
++
+ 	asm("syscall"
+ 		: "=a" (ret)
+ 		: "0" (__NR_clock_gettime), "D" (clock), "S" (ts)
+diff --git a/arch/x86/um/vdso/um_vdso.h b/arch/x86/um/vdso/um_vdso.h
+new file mode 100644
+index 000000000000..d366558ee6a0
+--- /dev/null
++++ b/arch/x86/um/vdso/um_vdso.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_X86_UM_VDSO_DATA_H
++#define _ASM_X86_UM_VDSO_DATA_H
++
++/*
++ * Shared between the UML kernel (writer, arch/x86/um/vdso/vma.c, updated each
++ * timer tick) and the vDSO (reader, arch/x86/um/vdso/um_vdso.c). Lets the
++ * guest answer clock_gettime(CLOCK_*_COARSE) from a mapped page with no
++ * syscall/trap at all. Coarse clocks are defined at tick resolution, so a
++ * per-tick snapshot is exact. Lives in the page directly below the vDSO code.
++ */
++struct um_vdso_data {
++	unsigned int seq;	/* seqlock; odd = update in progress */
++	unsigned int valid;	/* 1 once published (and not time-travel) */
++	long mono_coarse_sec;
++	long mono_coarse_nsec;
++	long real_coarse_sec;
++	long real_coarse_nsec;
++};
++
++#endif
+diff --git a/arch/x86/um/vdso/vma.c b/arch/x86/um/vdso/vma.c
+index 51a2b9f2eca9..204bb911781e 100644
+--- a/arch/x86/um/vdso/vma.c
++++ b/arch/x86/um/vdso/vma.c
+@@ -6,16 +6,45 @@
+ #include <linux/slab.h>
+ #include <linux/sched.h>
+ #include <linux/mm.h>
++#include <linux/timekeeping.h>
+ #include <asm/page.h>
+ #include <asm/elf.h>
+ #include <linux/init.h>
++#include "um_vdso.h"
+ 
+ unsigned long um_vdso_addr;
+ static struct page *um_vdso;
++static struct page *um_vdso_data_page;
++/* The data page is mapped immediately below the vDSO code page. */
++static struct page *um_vdso_pages[2];
++static struct um_vdso_data *um_vdso_data;
+ 
+ extern unsigned long task_size;
+ extern char vdso_start[], vdso_end[];
+ 
++/* Called from the timer tick (arch/um/kernel/time.c) when not time-travelling. */
++void um_vdso_update_coarse(void)
++{
++	struct um_vdso_data *vd = um_vdso_data;
++	struct timespec64 m, r;
++
++	if (!vd)
++		return;
++
++	ktime_get_coarse_ts64(&m);
++	ktime_get_coarse_real_ts64(&r);
++
++	WRITE_ONCE(vd->seq, vd->seq + 1);	/* -> odd */
++	smp_wmb();
++	vd->mono_coarse_sec  = m.tv_sec;
++	vd->mono_coarse_nsec = m.tv_nsec;
++	vd->real_coarse_sec  = r.tv_sec;
++	vd->real_coarse_nsec = r.tv_nsec;
++	smp_wmb();
++	vd->valid = 1;
++	WRITE_ONCE(vd->seq, vd->seq + 1);	/* -> even */
++}
++
+ static int __init init_vdso(void)
+ {
+ 	BUG_ON(vdso_end - vdso_start > PAGE_SIZE);
+@@ -28,6 +57,14 @@ static int __init init_vdso(void)
+ 
+ 	copy_page(page_address(um_vdso), vdso_start);
+ 
++	um_vdso_data_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
++	if (!um_vdso_data_page)
++		panic("Cannot allocate vdso data page\n");
++	um_vdso_data = page_address(um_vdso_data_page);
++
++	um_vdso_pages[0] = um_vdso_data_page;	/* lower address */
++	um_vdso_pages[1] = um_vdso;		/* vDSO code (== um_vdso_addr) */
++
+ 	return 0;
+ }
+ subsys_initcall(init_vdso);
+@@ -38,13 +75,14 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+ 	struct mm_struct *mm = current->mm;
+ 	static struct vm_special_mapping vdso_mapping = {
+ 		.name = "[vdso]",
+-		.pages = &um_vdso,
++		.pages = um_vdso_pages,
+ 	};
+ 
+ 	if (mmap_write_lock_killable(mm))
+ 		return -EINTR;
+ 
+-	vma = _install_special_mapping(mm, um_vdso_addr, PAGE_SIZE,
++	/* Map [data page][vDSO code page]; the ELF base stays um_vdso_addr. */
++	vma = _install_special_mapping(mm, um_vdso_addr - PAGE_SIZE, 2 * PAGE_SIZE,
+ 		VM_READ|VM_EXEC|
+ 		VM_MAYREAD|VM_MAYWRITE|VM_MAYEXEC,
+ 		&vdso_mapping);
