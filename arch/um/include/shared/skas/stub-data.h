@@ -86,6 +86,17 @@ struct stub_data {
 	long long clock_mono_offset;
 	long long clock_real_offset;
 
+	/*
+	 * When the guest mm has a single user (single-threaded process,
+	 * mm_users == 1) the stub may skip the per-trap FS/GS arch_prctl
+	 * resync: there is no other thread whose saved FS/GS could be
+	 * clobbered, and UML never rewrites an FS/GS it believes unchanged,
+	 * so a wrfsbase by the lone thread survives. UML stamps this from
+	 * handle_syscall(); a clone() that shares the mm crosses and
+	 * re-stamps 0 before the new thread runs.
+	 */
+	int mm_single_threaded;
+
 	/* Stack for signal handlers and stub syscall execution. */
 	unsigned char sigstack[UM_KERN_PAGE_SIZE] __aligned(UM_KERN_PAGE_SIZE);
 };

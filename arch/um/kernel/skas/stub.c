@@ -164,11 +164,16 @@ stub_signal_interrupt(int sig, siginfo_t *info, void *p)
 	 * directly, so refresh arch_data before handing control back to UML.
 	 * get_stub_state() copies these values to pt_regs, keeping subsequent
 	 * set_stub_state() comparisons accurate.
+	 *
+	 * Skip it on a single-threaded mm, where there is no other thread
+	 * whose saved FS/GS could be clobbered (see mm_single_threaded).
 	 */
-	stub_syscall2(__NR_arch_prctl, ARCH_GET_FS,
-		      (unsigned long)&d->arch_data.fs_base);
-	stub_syscall2(__NR_arch_prctl, ARCH_GET_GS,
-		      (unsigned long)&d->arch_data.gs_base);
+	if (!d->mm_single_threaded) {
+		stub_syscall2(__NR_arch_prctl, ARCH_GET_FS,
+			      (unsigned long)&d->arch_data.fs_base);
+		stub_syscall2(__NR_arch_prctl, ARCH_GET_GS,
+			      (unsigned long)&d->arch_data.gs_base);
+	}
 #endif
 
 restart_wait:

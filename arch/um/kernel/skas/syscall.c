@@ -15,6 +15,8 @@
 #include <asm/unistd.h>
 #include <asm/delay.h>
 #include <linux/timekeeping.h>
+#include <linux/sched.h>
+#include <linux/mm.h>
 #include <os.h>
 #include <skas/skas.h>
 #include <stub-data.h>
@@ -39,6 +41,19 @@ void handle_syscall(struct uml_pt_regs *r)
 		goto out;
 
 	syscall = UPT_SYSCALL_NR(r);
+
+	/*
+	 * Tell the stub whether this mm is single-threaded, so it can skip
+	 * the per-trap FS/GS resync. A clone() that shares the mm bumps
+	 * mm_users and crosses here, re-stamping 0 before the new thread runs.
+	 */
+	if (um_backend->stub_syscall_uses_futex && current->mm) {
+		struct mm_id *mm = current_mm_id();
+
+		if (mm && mm->stack)
+			((struct stub_data *)mm->stack)->mm_single_threaded =
+				(atomic_read(&current->mm->mm_users) == 1);
+	}
 
 	/*
 	 * If no time passes, then sched_yield may not actually yield, causing
