@@ -1,0 +1,40 @@
+diff --git a/arch/um/Makefile b/arch/um/Makefile
+index 63b0d1f429cd..e2049650b6b7 100644
+--- a/arch/um/Makefile
++++ b/arch/um/Makefile
+@@ -91,6 +91,12 @@ USER_CFLAGS = $(patsubst $(KERNEL_DEFINES),,$(patsubst -I%,,$(KBUILD_CFLAGS))) \
+ 		-include $(srctree)/include/linux/compiler-version.h \
+ 		-include $(srctree)/include/linux/kconfig.h
+ 
++# USER_OBJS are host-boundary code (host headers, host ABI). They must not be
++# LTO-merged with kernel objects: cross-module optimization across the
++# host/kernel boundary is invalid and miscompiles early boot. Force them native
++# (-fno-lto wins as the last flag over the inherited $(CC_FLAGS_LTO)).
++USER_CFLAGS += -fno-lto
++
+ #This will adjust *FLAGS accordingly to the platform.
+ include $(srctree)/$(ARCH_DIR)/Makefile-os-Linux
+ 
+diff --git a/scripts/link-vmlinux.sh b/scripts/link-vmlinux.sh
+index f99e196abeea..b3fd6717841f 100755
+--- a/scripts/link-vmlinux.sh
++++ b/scripts/link-vmlinux.sh
+@@ -82,6 +82,18 @@ vmlinux_link()
+ 		ld="${CC}"
+ 		ldflags="${CFLAGS_vmlinux}"
+ 		ldlibs="-lutil -lrt -lpthread"
++		# um links vmlinux as a hosted executable with $(CC) as the
++		# linker driver. Under LTO the inputs (vmlinux.o,
++		# .vmlinux.export.o) are LLVM bitcode, which clang's default
++		# linker (BFD) cannot read ("file format not recognized").
++		# Point the driver at the kernel's configured linker (lld),
++		# mirroring KBUILD_USERLDFLAGS' --ld-path=$(LD).
++		if is_enabled CONFIG_LTO_CLANG; then
++			ldflags="${ldflags} --ld-path=${LD}"
++			# lld enforces relro-section contiguity that um's hosted
++			# linker script does not provide; um needs no relro.
++			ldflags="${ldflags} ${wl}-z,norelro"
++		fi
+ 	else
+ 		wl=
+ 		ld="${LD}"

@@ -40,6 +40,36 @@ mismatch warnings (`x86_64-pc-linux-gnu` for arch/x86/um objects vs
 `x86_64-unknown-linux-gnu` for generic). **This is a real UML+LTO integration gap
 worth an upstream report** (UML claims the Kconfig support but it doesn't link).
 
+### Tested the fix — UML+LTO is broken at THREE layers (2026-06-19)
+
+Root-caused and patched each layer in turn; partial patch kept at
+`upstream-patches/2026-06-19-um-lto-link-partial.patch`:
+
+1. **Link uses BFD, not lld.** Confirmed in isolation: `ld.bfd` on LLVM bitcode
+   gives *exactly* "file not recognized: file format not recognized"; `ld.lld`
+   reads it fine. The um path uses `${CC}` as the linker driver, and clang
+   defaults to `/usr/bin/ld` (bfd). **Fix:** add `--ld-path=${LD}` under LTO
+   (mirrors `KBUILD_USERLDFLAGS`). → build advances.
+2. **lld relro contiguity.** Next error: `.dynamic`/`.got` "not contiguous with
+   other relro sections" — UML's hosted linker script doesn't group relro and
+   lld is stricter than bfd. **Fix:** `-z norelro` (um needs no relro). → links;
+   `vmlinux` produced.
+3. **Boot segfault (UNRESOLVED).** The LTO kernel **builds but does not boot** —
+   `Kernel panic: Segfault with no mm` at backend init. Excluding the
+   host-boundary `USER_OBJS` (os-Linux) from LTO (`USER_CFLAGS += -fno-lto`) did
+   **not** fix it, so the miscompile is deeper — almost certainly whole-program
+   LTO reordering/merging the **stub + linker-script sections** that UML's
+   execution model depends on (the stub runs seccomp'd at fixed
+   `__syscall_stub_*` sections).
+
+**Confirmed verdict:** the build failure is real and fixable (layers 1–2, a small
+upstream `link-vmlinux.sh` patch), but that is **necessary, not sufficient** —
+UML+ThinLTO still yields a non-booting kernel. The advertised Kconfig support is
+bit-rotted at multiple layers; a working fix needs LTO excluded from the
+stub/section-sensitive code too (research-grade), and per the perf measurements
+there is **no payoff** for doing so. Honest result of "test the patch": it does
+not make LTO work.
+
 ## PGO / AutoFDO / Propeller
 
 `AUTOFDO_CLANG` and `PROPELLER_CLANG` exist in `arch/Kconfig` but
