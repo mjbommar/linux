@@ -909,6 +909,8 @@ static void cifs_open_info_to_fattr(struct cifs_fattr *fattr,
 	struct cifs_tcon *tcon = cifs_sb_master_tcon(cifs_sb);
 
 	memset(fattr, 0, sizeof(*fattr));
+	if (data->unknown_nlink)
+		fattr->cf_flags |= CIFS_FATTR_UNKNOWN_NLINK;
 	fattr->cf_cifsattrs = le32_to_cpu(info->Attributes);
 	if (info->DeletePending)
 		fattr->cf_flags |= CIFS_FATTR_DELETE_PENDING;
@@ -1145,7 +1147,7 @@ static void cifs_set_fattr_ino(int xid, struct cifs_tcon *tcon, struct super_blo
 			fattr->cf_uniqueid = CIFS_I(*inode)->uniqueid;
 		else {
 			fattr->cf_uniqueid = iunique(sb, ROOT_I);
-			cifs_autodisable_serverino(cifs_sb);
+			cifs_autodisable_serverino(cifs_sb, "Cannot retrieve inode number via get_srv_inum", rc);
 		}
 		return;
 	}
@@ -1642,7 +1644,7 @@ retry_iget5_locked:
 			fattr->cf_flags &= ~CIFS_FATTR_INO_COLLISION;
 
 			if (inode_has_hashed_dentries(inode)) {
-				cifs_autodisable_serverino(CIFS_SB(sb));
+				cifs_autodisable_serverino(CIFS_SB(sb), "Inode number collision detected", 0);
 				iput(inode);
 				fattr->cf_uniqueid = iunique(sb, ROOT_I);
 				goto retry_iget5_locked;
@@ -1708,8 +1710,9 @@ struct inode *cifs_root_iget(struct super_block *sb)
 iget_root:
 	if (!rc) {
 		if (fattr.cf_flags & CIFS_FATTR_JUNCTION) {
+			cifs_dbg(VFS, "Removing junction mark and disabling 'serverino' to prevent inode collisions\n");
 			fattr.cf_flags &= ~CIFS_FATTR_JUNCTION;
-			cifs_autodisable_serverino(cifs_sb);
+			cifs_autodisable_serverino(cifs_sb, "Cannot retrieve attributes for junction point", rc);
 		}
 		inode = cifs_iget(sb, &fattr);
 	}
@@ -2812,9 +2815,7 @@ cifs_revalidate_mapping(struct inode *inode)
 	}
 
 skip_invalidate:
-	clear_bit_unlock(CIFS_INO_LOCK, flags);
-	smp_mb__after_atomic();
-	wake_up_bit(flags, CIFS_INO_LOCK);
+	clear_and_wake_up_bit(CIFS_INO_LOCK, flags);
 
 	return rc;
 }
@@ -3038,13 +3039,20 @@ int cifs_fiemap(struct inode *inode, struct fiemap_extent_info *fei, u64 start,
 
 void cifs_setsize(struct inode *inode, loff_t offset)
 {
+	loff_t old_size;
+	u64 blocks = CIFS_INO_BLOCKS(offset);
+
 	spin_lock(&inode->i_lock);
+	old_size = i_size_read(inode);
 	i_size_write(inode, offset);
+
 	/*
-	 * Until we can query the server for actual allocation size,
-	 * this is best estimate we have for blocks allocated for a file.
+	 * Extending EOF does not allocate the intervening range. Only clamp
+	 * i_blocks on shrink; allocation growth comes from writes or from the
+	 * server-reported AllocationSize.
 	 */
-	inode->i_blocks = CIFS_INO_BLOCKS(offset);
+	if (offset < old_size && (u64)inode->i_blocks > blocks)
+		inode->i_blocks = blocks;
 	spin_unlock(&inode->i_lock);
 	inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 	truncate_pagecache(inode, offset);
@@ -3376,7 +3384,8 @@ cifs_setattr_nounix(struct dentry *direntry, struct iattr *attrs)
 	if (attrs->ia_valid & ATTR_GID)
 		gid = attrs->ia_gid;
 
-	if (sbflags & (CIFS_MOUNT_CIFS_ACL | CIFS_MOUNT_MODE_FROM_SID)) {
+	if ((sbflags & (CIFS_MOUNT_CIFS_ACL | CIFS_MOUNT_MODE_FROM_SID)) ||
+	    cifs_sb_master_tcon(cifs_sb)->posix_extensions) {
 		if (uid_valid(uid) || gid_valid(gid)) {
 			mode = NO_CHANGE_64;
 			rc = id_mode_to_cifs_acl(inode, full_path, &mode,

@@ -406,9 +406,6 @@ config ARCH_RV32I
 	bool "RV32I"
 	depends on NONPORTABLE
 	select 32BIT
-	select GENERIC_LIB_ASHLDI3
-	select GENERIC_LIB_ASHRDI3
-	select GENERIC_LIB_LSHRDI3
 	select GENERIC_LIB_UCMPDI2
 
 config ARCH_RV64I
@@ -457,7 +454,8 @@ config NR_CPUS
 	range 2 32 if RISCV_SBI_V01 && 32BIT
 	range 2 64 if RISCV_SBI_V01 && 64BIT
 	default "32" if 32BIT
-	default "64" if 64BIT
+	default "64" if RISCV_SBI_V01 && 64BIT
+	default "256" if !RISCV_SBI_V01 && 64BIT
 
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
