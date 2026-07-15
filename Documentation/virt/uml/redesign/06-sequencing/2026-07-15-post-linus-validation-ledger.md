@@ -51,7 +51,7 @@ made.
 | RSS/MM | post-workaround stress | PASS | KVM MM 5/5; fork stress 522/522 with 406 child PIDs and 0.00% drift; final mt-mini KVM-v2 p50 305 ms and seccomp p50 1038 ms with zero strict/verify failures; no RSS warning or repair marker |
 | post-fix | focused rerun | PASS | warning-free lean build, KVM smoke 5/5, CPython tier-0 on seccomp and the `kvm` alias, Vector2 KUnit 98/98, snapshot real-KVM 4/4, KVM MM 5/5, pool TAP, cargo tests, and unfiltered KUnit all pass |
 | soak | bounded mission soak | PENDING | superseded by focused gates for this fix set; retain as an optional CI-duration check |
-| soak | natural 24-hour KVM-v2 soak | RUNNING | started 2026-07-15 22:32 UTC from branch head `48ae35c87ea0`, PID 1261059; KVM-v2-only rotation covers memcheck, iocheck, stress-ng, CPython soak, and tiny kbuild with two workers for 86,400 seconds |
+| soak | natural 24-hour KVM-v2 soak | RUNNING | persistent controller started 2026-07-15 22:33 UTC as PID 1265051 using the post-fix kernel; KVM-v2-only rotation covers memcheck, iocheck, stress-ng, CPython soak, and tiny kbuild with two workers for 86,400 seconds; first memcheck phase passed 20/20 |
 
 ## Correctness and publication blockers
 
