@@ -579,10 +579,22 @@ fn wait_for_mconsole_ready(path: &str, deadline: Duration) -> Result<()> {
     let mut last_err = None;
 
     while Instant::now() < end {
+        /*
+         * A forked member may need several hundred milliseconds to rebuild
+         * its timer, SKAS stub, network identity, and mconsole SIGIO owner.
+         * A 100 ms receive timeout used to abandon client socket paths faster
+         * than the member could consume the queued datagrams.  Once the member
+         * became runnable it could spend the readiness window replying to
+         * clients that had already unlinked their sockets.  Keep each attempt
+         * bounded, but give it enough time to receive its own reply and avoid
+         * manufacturing a stale-request backlog.
+         */
+        let remaining = end.saturating_duration_since(Instant::now());
+        let probe_timeout = remaining.min(Duration::from_secs(1));
         match mconsole_client::send_mconsole_command_with_timeout(
             socket_path,
             "version",
-            Duration::from_millis(100),
+            probe_timeout,
         ) {
             Ok(_) => return Ok(()),
             Err(e) => last_err = Some(e),
