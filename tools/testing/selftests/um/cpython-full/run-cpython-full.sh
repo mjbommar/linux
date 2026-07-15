@@ -38,7 +38,17 @@ if [ ! -f "$ALLOW" ]; then
 fi
 
 WORK=$(mktemp -d -t cpython-full.XXXXXX)
-trap 'umlctl rm "$INSTANCE" 2>/dev/null; rm -rf "$WORK"' EXIT
+LOG=""
+cleanup() {
+    if [ -n "${CPYTHON_FULL_LOG:-}" ] && [ -n "$LOG" ] && [ -f "$LOG" ]; then
+        mkdir -p "$(dirname "$CPYTHON_FULL_LOG")"
+        cp "$LOG" "$CPYTHON_FULL_LOG"
+        echo "  preserved guest log: $CPYTHON_FULL_LOG"
+    fi
+    umlctl rm "$INSTANCE" 2>/dev/null
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 # Substitute the instance name so concurrent runs don't collide, and honor the
 # documented backend selector.  The old harness parsed UML_BACKEND but left the
