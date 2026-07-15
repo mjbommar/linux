@@ -45,8 +45,15 @@ BINARY=${UML_BINARY:-/tmp/uml-kvmint/linux}
 MEM=${UML_MEM:-1024M}
 PY=${CPYTHON_TIER0_PY:-/usr/bin/python3}
 BACKEND_ARG=""
+EXPECTED_BACKEND=""
 if [ -n "${CPYTHON_TIER0_BACKEND:-}" ]; then
 	BACKEND_ARG="backend=force=${CPYTHON_TIER0_BACKEND}"
+	EXPECTED_BACKEND=${CPYTHON_TIER0_BACKEND}
+	# `kvm` is the accepted selector alias; the backend reports its
+	# canonical implementation name in the boot log.
+	if [ "$EXPECTED_BACKEND" = "kvm" ]; then
+		EXPECTED_BACKEND=kvm-v2
+	fi
 fi
 
 if [ ! -x "$BINARY" ]; then
@@ -73,7 +80,8 @@ if [ -z "$PY_TESTDIR" ] || [ ! -f "$PY_TESTDIR/test_hashlib.py" ]; then
 fi
 
 # /dev/kvm self-heal: same retry pattern as the other kvm runners.
-if [ "${CPYTHON_TIER0_BACKEND:-}" = "kvm" ]; then
+case "${CPYTHON_TIER0_BACKEND:-}" in
+kvm|kvm-v2)
 	if [ ! -e /dev/kvm ]; then
 		echo "SKIP: /dev/kvm not present" >&2
 		exit 4
@@ -87,7 +95,8 @@ if [ "${CPYTHON_TIER0_BACKEND:-}" = "kvm" ]; then
 		echo "SKIP: /dev/kvm not readable" >&2
 		exit 4
 	fi
-fi
+	;;
+esac
 
 OUT=$(timeout --kill-after=15 600 "$BINARY" \
 	$BACKEND_ARG \
@@ -100,8 +109,8 @@ OUT=$(timeout --kill-after=15 600 "$BINARY" \
 
 if [ -n "${CPYTHON_TIER0_BACKEND:-}" ]; then
 	OBSERVED=$(echo "$OUT" | sed -n 's/^um: backend = \([a-z0-9-]*\).*/\1/p' | head -1)
-	if [ "$OBSERVED" != "${CPYTHON_TIER0_BACKEND}" ]; then
-		echo "SKIP: backend probed to '$OBSERVED' (asked for ${CPYTHON_TIER0_BACKEND})" >&2
+	if [ "$OBSERVED" != "$EXPECTED_BACKEND" ]; then
+		echo "SKIP: backend probed to '$OBSERVED' (asked for ${CPYTHON_TIER0_BACKEND}, expected $EXPECTED_BACKEND)" >&2
 		exit 4
 	fi
 fi

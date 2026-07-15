@@ -39,6 +39,10 @@ mode = "none"
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
+# Ubuntu and Debian package the standard-library tests separately.  Point this
+# at an unpacked matching testsuite when `import test` exists but the individual
+# test modules do not.  An unset value expands to an empty search prefix.
+PYTHONPATH = "${CPYTHON_FULL_PYTHONPATH}"
 
 [[init.phases]]
 name = "smoke"

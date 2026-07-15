@@ -40,9 +40,13 @@ fi
 WORK=$(mktemp -d -t cpython-full.XXXXXX)
 trap 'umlctl rm "$INSTANCE" 2>/dev/null; rm -rf "$WORK"' EXIT
 
-# Substitute the instance name so concurrent runs don't collide.
-sed "s/^name = \"cpython-test-full\"$/name = \"$INSTANCE\"/" "$TOML" \
-    > "$WORK/Umlfile.toml"
+# Substitute the instance name so concurrent runs don't collide, and honor the
+# documented backend selector.  The old harness parsed UML_BACKEND but left the
+# checked-in `backend = "seccomp"` unchanged, so purported KVM runs silently
+# exercised seccomp.
+sed -e "s/^name = \"cpython-test-full\"$/name = \"$INSTANCE\"/" \
+    -e "s/^backend = \"seccomp\"$/backend = \"$BACKEND\"/" \
+    "$TOML" > "$WORK/Umlfile.toml"
 
 echo "== launch UML guest, run python3 -m test (full suite) =="
 export UML_KERNEL="$KERNEL"
