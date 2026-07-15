@@ -1312,33 +1312,6 @@ void exit_mmap(struct mm_struct *mm)
 	free_pgtables(&tlb, &unmap);
 	tlb_finish_mmu(&tlb);
 
-#ifdef CONFIG_UML
-	{
-		int i;
-
-		for (i = 0; i < NR_MM_COUNTERS; i++) {
-			long x = percpu_counter_sum(&mm->rss_stat[i]);
-
-			if (x != 0) {
-				/*
-				 * UML-specific percpu_counter accounting
-				 * drift: all PTEs have been zapped by
-				 * unmap_vmas + free_pgtables above, but the
-				 * counter is off (typically by 1).  Confirmed
-				 * via page table scan: no present PTEs remain
-				 * — the counter itself drifted, not a leaked
-				 * mapping.  Correct it here so check_mm
-				 * doesn't fire a spurious BUG.  The mm has no
-				 * live references at this point.
-				 */
-				pr_info_ratelimited("um: exit_mmap: correcting rss_stat[%d] drift of %ld for pid=%d\n",
-						    i, x, task_pid_nr(current));
-				percpu_counter_add(&mm->rss_stat[i], -x);
-			}
-		}
-	}
-#endif
-
 	/*
 	 * Walk the list again, actually closing and freeing it, with preemption
 	 * enabled, without holding any MM locks besides the unreachable
