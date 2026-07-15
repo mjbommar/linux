@@ -15,6 +15,7 @@
 #include <os.h>
 
 #include "vector2_internal.h"
+#include "vector2_test.h"
 
 #define VECTOR2_FD_OPEN_STOP_STRESS_ITERS	1000U
 #define VECTOR2_FD_FAILURE_STRESS_ITERS		10000U
@@ -140,8 +141,7 @@ static void vector2_fd_multiqueue_open_close_test(struct kunit *test)
 	vdev->cfg.queues = 2;
 	dev = vector2_fd_test_alloc_netdev(test, vdev);
 
-	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
-	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	KUNIT_ASSERT_EQ(test, um_vec2_test_adjacent_pipe(fds), 0);
 	vdev->cfg.fd = fds[0];
 	vdev->cfg.has_fd = true;
 
@@ -173,8 +173,7 @@ static void vector2_fd_multiqueue_missing_second_fd_unwinds_test(struct kunit *t
 	vdev->cfg.queues = 2;
 	dev = vector2_fd_test_alloc_netdev(test, vdev);
 
-	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
-	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	KUNIT_ASSERT_EQ(test, um_vec2_test_adjacent_pipe(fds), 0);
 	os_close_file(fds[1]);
 	fds[1] = -1;
 	vdev->cfg.fd = fds[0];
@@ -206,8 +205,7 @@ static void vector2_fd_multiqueue_partial_open_unwind_test(struct kunit *test)
 	vdev->cfg.queues = 2;
 	dev = vector2_fd_test_alloc_netdev(test, vdev);
 
-	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
-	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	KUNIT_ASSERT_EQ(test, um_vec2_test_adjacent_pipe(fds), 0);
 	vdev->cfg.fd = fds[0];
 	vdev->cfg.has_fd = true;
 

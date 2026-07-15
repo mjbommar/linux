@@ -15,6 +15,7 @@
 
 #include "vector2_fake_host.h"
 #include "vector2_internal.h"
+#include "vector2_test.h"
 
 static struct um_vec2_dev *vector2_ethtool_test_alloc_vdev(struct kunit *test,
 							   unsigned int unit)
@@ -440,8 +441,7 @@ vector2_ethtool_traffic_open(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, netif_set_real_num_tx_queues(ctx->dev, 2), 0);
 	KUNIT_ASSERT_EQ(test, netif_set_real_num_rx_queues(ctx->dev, 2), 0);
 
-	KUNIT_ASSERT_EQ(test, os_pipe(ctx->fds, 1, 1), 0);
-	KUNIT_ASSERT_EQ(test, ctx->fds[1], ctx->fds[0] + 1);
+	KUNIT_ASSERT_EQ(test, um_vec2_test_adjacent_pipe(ctx->fds), 0);
 	ctx->vdev->cfg.fd = ctx->fds[0];
 	ctx->vdev->cfg.has_fd = true;
 
