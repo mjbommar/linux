@@ -681,6 +681,7 @@ static int kvm_v2_snapshot_capture_for_export(struct kvm_v2_snapshot *snap)
 	return rc;
 }
 
+#ifdef CONFIG_DEBUG_FS
 static int __kvm_v2_snapshot_elf_export_path(const char *path)
 {
 	struct kvm_v2_snapshot *snap;
@@ -716,6 +717,7 @@ out_destroy:
 	kvm_v2_snapshot_destroy(snap);
 	return rc;
 }
+#endif
 
 static int __kvm_v2_snapshot_elf_export_host_path(const char *path)
 {
@@ -754,6 +756,7 @@ out_destroy:
 	return rc;
 }
 
+#ifdef CONFIG_DEBUG_FS
 static int kvm_v2_snapshot_elf_export_path(const char *path)
 {
 	int rc;
@@ -764,6 +767,7 @@ static int kvm_v2_snapshot_elf_export_path(const char *path)
 
 	return rc;
 }
+#endif
 
 static int kvm_v2_snapshot_elf_export_host_path(const char *path)
 {
