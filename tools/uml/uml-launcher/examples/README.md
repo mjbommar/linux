@@ -31,6 +31,7 @@ CLI flags > TOML > env vars > defaults.
 | [`vector2-fd-multiqueue.toml`](vector2-fd-multiqueue.toml) | Vector2 TAP smoke using launcher-owned inherited fd multiqueue |
 | [`vector2-auto-queues.toml`](vector2-auto-queues.toml) | Vector2 TAP smoke using `queues = "auto"` to match runtime.ncpus |
 | [`vector2-fastapi-smoke.toml`](vector2-fastapi-smoke.toml) | Vector2 FastAPI/uvicorn smoke using fd handoff and automatic queue sizing |
+| [`vector2-django-smoke.toml`](vector2-django-smoke.toml) | Vector2 Django/gunicorn smoke using fd handoff and automatic queue sizing |
 | [`vector2-lifecycle-stress.toml`](vector2-lifecycle-stress.toml) | Vector2 live `ip link up/down` lifecycle stress with ethtool counter checks |
 | [`vector2-failed-open.toml`](vector2-failed-open.toml) | Vector2 validation-only failed-open injection and open-unwind counter check |
 

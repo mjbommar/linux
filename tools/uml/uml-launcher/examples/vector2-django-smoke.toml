@@ -1,0 +1,159 @@
+# umlctl Umlfile - vector2 Django/gunicorn smoke.
+#
+# This exercises the real Django + gunicorn stack inside a UML guest while
+# vector2 provides TAP networking through launcher-owned fd handoff.  It is
+# gate-loop friendly: the server starts in the background, the guest probes
+# it, and the workload shuts down cleanly.
+#
+# Prerequisite:
+#   uv venv $HOME/uml-venv --python 3.14
+#   uv pip install --python $HOME/uml-venv/bin/python django gunicorn
+#
+# Usage:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl gate loop \
+#       -f tools/uml/uml-launcher/examples/vector2-django-smoke.toml \
+#       -W 1 -M 1 --timeout 240 --pass-marker VECTOR2_DJANGO_OK
+
+schema_version = 1
+
+[instance]
+name = "vector2-django-smoke"
+labels = { service = "django", driver = "vector2", transport = "fd", queues = "auto" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "2048M"
+ncpus = 2
+
+[network]
+mode = "tap"
+driver = "vector2"
+host_mode = "auto"
+queues = "auto"
+tap_name = "v2django0"
+guest_ip = "10.92.0.2/24"
+host_ip = "10.92.0.1/24"
+gateway = "10.92.0.1"
+nameservers = ["8.8.8.8", "1.1.1.1"]
+masquerade_via = "auto"
+ports = []
+
+[[volumes]]
+src = "${HOME}/uml-venv"
+dst = "/opt/venv"
+mode = "ro"
+
+[env]
+HOME = "${HOME}"
+PATH = "/opt/venv/bin:/usr/bin:/bin:/sbin:/usr/sbin"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "network-metadata"
+cmd = "env | grep '^UMLCTL_NETWORK_' | sort; echo UMLCTL_NETDEV=$UMLCTL_NETDEV"
+
+[[init.phases]]
+name = "gateway"
+cmd = "ping -c 3 \"$UMLCTL_GATEWAY\""
+timeout_secs = 20
+
+[[init.phases]]
+name = "django-up"
+cmd = """
+cat > /tmp/tier3_django_app.py <<'PY'
+from django.conf import settings
+
+settings.configure(
+    DEBUG=False,
+    SECRET_KEY="uml-vector2-django-smoke",
+    ROOT_URLCONF=__name__,
+    ALLOWED_HOSTS=["*"],
+    MIDDLEWARE=[],
+)
+
+import django
+django.setup()
+
+from django.http import JsonResponse
+from django.urls import path
+from django.core.wsgi import get_wsgi_application
+
+def health(_request):
+    return JsonResponse({"ok": True, "driver": "vector2"})
+
+def sum_to_n(_request, n):
+    return JsonResponse({"n": n, "sum": n * (n + 1) // 2})
+
+urlpatterns = [
+    path("health", health),
+    path("sum/<int:n>", sum_to_n),
+]
+
+wsgi = get_wsgi_application()
+PY
+cd /tmp
+/opt/venv/bin/gunicorn tier3_django_app:wsgi \
+    --bind 0.0.0.0:8766 --workers 2 --threads 2 \
+    >/tmp/vector2-django.log 2>&1 &
+echo $! > /tmp/vector2-django.pid
+port_ready() {
+python3 - <<'PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", 8766))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+for i in $(seq 1 80); do
+    port_ready && break
+    sleep 0.5
+done
+port_ready || { echo SERVER_FAIL; cat /tmp/vector2-django.log; exit 1; }
+echo SERVER_READY
+"""
+expect = "SERVER_READY"
+timeout_secs = 60
+
+[[init.phases]]
+name = "guest-http"
+cmd = """
+ok=0; fail=0
+for i in $(seq 1 50); do
+    body=$(curl -fsS http://127.0.0.1:8766/health || true)
+    case "$body" in
+        *'"ok": true'*) ok=$((ok+1)) ;;
+        *) fail=$((fail+1)); echo "bad health response: $body" ;;
+    esac
+done
+sum_body=$(curl -fsS http://127.0.0.1:8766/sum/100 || true)
+case "$sum_body" in
+    *'"sum": 5050'*) ok=$((ok+1)) ;;
+    *) fail=$((fail+1)); echo "bad sum response: $sum_body" ;;
+esac
+echo "DJANGO_HTTP ok=$ok fail=$fail"
+[ "$fail" -eq 0 ] || (echo VECTOR2_DJANGO_FAIL; exit 1)
+"""
+timeout_secs = 60
+
+[[init.phases]]
+name = "shutdown"
+cmd = "kill $(cat /tmp/vector2-django.pid) 2>/dev/null || true; sleep 1; echo VECTOR2_DJANGO_OK; echo REPRO_DONE rc=$?"
+timeout_secs = 10
+
+[debug]
+strace = false
+gdb = false
+gdb_port = 5678
+log_dir = ""
+keep_running_on_failure = false
+
