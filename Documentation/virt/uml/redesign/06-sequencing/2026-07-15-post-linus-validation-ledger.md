@@ -10,7 +10,7 @@ for the commits it tested; it is not silently carried forward as current proof.
 - branch: `next`
 - synchronized integration commit: `efd6ecf10792ff5550607443b9a35f28b3fefb5b`
 - post-fix kernel source commit: `cce63a5a6606c`
-- validation-harness source tip: `7ef901e6c8ed`
+- validation-harness source tip: `d402dcea1949`
 - Linus base: `58717b2a1365d06c8c64b72aa948541b53fe31eb`
 - merge base: `58717b2a1365d06c8c64b72aa948541b53fe31eb`
 - host architecture: `x86_64`
@@ -51,7 +51,9 @@ made.
 | RSS/MM | post-workaround stress | PASS | KVM MM 5/5; fork stress 522/522 with 406 child PIDs and 0.00% drift; final mt-mini KVM-v2 p50 305 ms and seccomp p50 1038 ms with zero strict/verify failures; no RSS warning or repair marker |
 | post-fix | focused rerun | PASS | warning-free lean build, KVM smoke 5/5, CPython tier-0 on seccomp and the `kvm` alias, Vector2 KUnit 98/98, snapshot real-KVM 4/4, KVM MM 5/5, pool TAP, cargo tests, and unfiltered KUnit all pass |
 | soak | bounded mission soak | PENDING | superseded by focused gates for this fix set; retain as an optional CI-duration check |
-| soak | natural 24-hour KVM-v2 soak | RUNNING | persistent controller started 2026-07-15 22:33 UTC as PID 1265051 using the post-fix kernel; KVM-v2-only rotation covers memcheck, iocheck, stress-ng, CPython soak, and tiny kbuild with two workers for 86,400 seconds; first memcheck phase passed 20/20 |
+| soak | first natural 24-hour KVM-v2 attempt | INVALID / STOPPED | stopped after 31 minutes and 460 rows: memcheck 100/100 PASS, iocheck 100/100 PASS, while stress-ng 0/100, CPython 0/80, and kbuild 0/80 never started their intended workload because hostfs prerequisites were absent or hidden; controlled init exit was also misclassified as PANIC |
+| soak | all-workload KVM-v2 preflight | PASS | corrected harness at `d402dcea1949`; one fresh iteration each of memcheck, iocheck, stress-ng, CPython, and 64-bit tiny kbuild passed 5/5 with `panic=false`; `soak-preflight-kvm-v2-20260715-r7/` |
+| soak | natural 24-hour KVM-v2 soak | PENDING RESTART | starts only from the pushed corrected harness after the five-workload preflight above |
 
 ## Correctness and publication blockers
 
@@ -89,6 +91,16 @@ made.
   they cannot substantiate claims about real Django or FastAPI.  The existing
   real FastAPI example and the new real Django example are the authoritative
   framework smoke paths for this ledger.
+- the first natural soak spent its failure budget discovering missing
+  `stress-ng` and CPython testsuite packages, then lost `/usr/bin/awk` when the
+  guest's private `/etc` overlay hid `/etc/alternatives`.  Selected workloads
+  now fail fast on host and guest prerequisites, the overlay preserves
+  alternatives targets, and tiny kbuild explicitly selects the running
+  kernel's 64-bit architecture rather than implicitly requiring a 32-bit SDK.
+- a failed init phase terminates PID 1 and UML consequently prints
+  `Attempted to kill init`; that controlled shutdown is now classified as the
+  workload FAIL it is, not as a spontaneous kernel PANIC.  Final summaries
+  also distinguish running, requested, threshold, and budget stop reasons.
 
 ## Publication boundary
 
