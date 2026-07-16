@@ -21,12 +21,19 @@ mode = "none"
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [[init.phases]]
 name = "smoke"
 cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 0
+
+[[init.phases]]
+name = "prerequisites"
+cmd = "python3 -c 'import test.test_hashlib' && echo CPYTHON_TESTSUITE_OK"
+expect = "CPYTHON_TESTSUITE_OK"
+timeout_secs = 10
 
 # Curated subset focused on syscall hot paths kvm-v2 must handle
 # correctly. Tight set picked to complete in ~60-90s wall-clock under

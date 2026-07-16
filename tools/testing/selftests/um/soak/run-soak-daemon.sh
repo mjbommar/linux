@@ -82,6 +82,13 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+case "$BUDGET_SEC" in
+	''|*[!0-9]*|0)
+		echo "ERR: --budget-sec must be a positive integer" >&2
+		exit 2
+		;;
+esac
+
 # Tier 3 v2 aliases reuse the base Django/FastAPI templates with a
 # different `network.driver` substitution.
 tier3_template_workload() {
@@ -168,6 +175,50 @@ for backend in "${BACKENDS[@]}"; do
 	esac
 done
 
+# Long soaks must not spend their failure budget discovering that a selected
+# workload cannot start on this host.  Because UML uses hostfs for `/`, these
+# host-side commands and Python modules are the same ones the guest will see.
+require_command() {
+	local workload=$1 command=$2
+
+	if ! command -v "$command" >/dev/null 2>&1; then
+		echo "ERR: workload '$workload' requires '$command' on the host/guest root" >&2
+		exit 2
+	fi
+}
+
+for w in "${WORKLOADS[@]}"; do
+	case "$w" in
+		memcheck)
+			[ -x "$SOAK_DIR/memcheck" ] || {
+				echo "ERR: workload 'memcheck' requires $SOAK_DIR/memcheck (run make in the soak directory)" >&2
+				exit 2
+			}
+			;;
+		iocheck)
+			[ -x "$SOAK_DIR/iocheck" ] || {
+				echo "ERR: workload 'iocheck' requires $SOAK_DIR/iocheck (run make in the soak directory)" >&2
+				exit 2
+			}
+			;;
+		stress-ng)
+			require_command "$w" stress-ng
+			;;
+		cpython-soak)
+			require_command "$w" python3
+			if ! python3 -c 'import test.test_hashlib' >/dev/null 2>&1; then
+				echo "ERR: workload 'cpython-soak' requires the matching CPython testsuite (test.test_hashlib)" >&2
+				exit 2
+			fi
+			;;
+		kbuild-tiny)
+			require_command "$w" make
+			require_command "$w" awk
+			require_command "$w" gcc
+			;;
+	esac
+done
+
 # Per-workload per-iter timeout. Mirrors run-pilot.sh's TIMEOUTS array.
 declare -A TIMEOUT_FOR=(
 	[memcheck]=90 [iocheck]=120 [stress-ng]=120
@@ -191,6 +242,7 @@ COMMIT=$(cd "$SOAK_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 BRANCH=$(cd "$SOAK_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
 
 STOP_REQUESTED=0
+STOP_REASON=running
 THROTTLE_PAUSED_TOTAL=0
 THROTTLE_EVENTS=0
 
@@ -207,6 +259,7 @@ declare -A WL_WINDOW
 on_term() {
 	echo "[$(date -uIs)] received SIGTERM/SIGINT - will stop after current workload phase"
 	STOP_REQUESTED=1
+	STOP_REASON=requested
 }
 trap on_term TERM INT
 
@@ -363,7 +416,7 @@ write_summary() {
 		echo "Start:    $(date -u -d "@$START_TS" +%Y-%m-%dT%H:%M:%SZ)"
 		echo "Now:      $(date -u +%Y-%m-%dT%H:%M:%SZ)   (${elapsed}s elapsed)"
 		echo "Budget:   ${BUDGET_SEC}s (${pct_consumed}% consumed)"
-		echo "Stop:     $([ "$STOP_REQUESTED" = 1 ] && echo "requested" || echo "running")"
+		echo "Stop:     $STOP_REASON"
 		echo "Kernel:   $UML_KERNEL"
 		echo "Commit:   $COMMIT ($BRANCH)"
 		echo
@@ -401,7 +454,7 @@ process_phase_results() {
 		verdict=FAIL; panic_b=false; timeout_b=false; host_error=false
 		if grep -q "REPRO_DONE rc=0" "$f"; then
 			verdict=PASS
-		elif grep -q "Kernel panic" "$f"; then
+		elif grep "Kernel panic" "$f" | grep -qv "Attempted to kill init"; then
 			verdict=PANIC; panic_b=true
 		elif grep -q -E "TIMEOUT|deadline exceeded" "$f"; then
 			verdict=TIMEOUT; timeout_b=true
@@ -421,6 +474,7 @@ process_phase_results() {
 				echo "[$(date -uIs)] THRESHOLD TRIPPED: $key (>$FAIL_THRESH_PCT% over rolling $FAIL_THRESH_WIN)" >&2
 				touch "$OUT/THRESHOLD_TRIPPED"
 				STOP_REQUESTED=1
+				STOP_REASON=threshold
 			else
 				echo "[$(date -uIs)] threshold tripped on $key; --continue-on-fail-threshold set, soaking on" >&2
 			fi
@@ -530,7 +584,7 @@ process_tier3_phase_results() {
 			verdict=FAIL; panic_b=false; timeout_b=false; host_error=false
 			if grep -q "REPRO_DONE rc=0" "$f"; then
 				verdict=PASS
-			elif grep -q "Kernel panic" "$f"; then
+			elif grep "Kernel panic" "$f" | grep -qv "Attempted to kill init"; then
 				verdict=PANIC; panic_b=true
 			elif grep -q -E "TIMEOUT|deadline exceeded" "$f"; then
 				verdict=TIMEOUT; timeout_b=true
@@ -548,6 +602,7 @@ process_tier3_phase_results() {
 					echo "[$(date -uIs)] THRESHOLD TRIPPED: $key (>$FAIL_THRESH_PCT% over rolling $FAIL_THRESH_WIN)" >&2
 					touch "$OUT/THRESHOLD_TRIPPED"
 					STOP_REQUESTED=1
+					STOP_REASON=threshold
 				else
 					echo "[$(date -uIs)] threshold tripped on $key; --continue-on-fail-threshold set, soaking on" >&2
 				fi
@@ -706,6 +761,7 @@ while [ "$STOP_REQUESTED" = 0 ]; do
 	ELAPSED=$((NOW - START_TS))
 	if [ "$ELAPSED" -ge "$BUDGET_SEC" ]; then
 		echo "[$(date -uIs)] budget elapsed (${ELAPSED}s >= ${BUDGET_SEC}s); stopping"
+		STOP_REASON=budget
 		break
 	fi
 

@@ -82,6 +82,14 @@ Tier 1 uses host-installed packages visible through hostfs:
 sudo apt install python3-requests python3-cryptography python3-numpy
 ```
 
+The default long-soak rotation also requires `stress-ng`, the matching CPython
+testsuite, and the normal build toolchain.  The daemon checks these before it
+creates a run directory:
+
+```
+sudo apt install stress-ng libpython3.14-testsuite build-essential gawk
+```
+
 Tier 2 expects a prebuilt uv virtualenv:
 
 ```

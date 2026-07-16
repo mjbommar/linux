@@ -1139,12 +1139,13 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("# test_pwd, test_socket, test_asyncio.test_subprocess,\n");
     s.push_str("# test___all__ fail with surprising errors (getpwuid,\n");
     s.push_str("# getgrnam, getservbyname, nsswitch resolution, broken\n");
-    s.push_str("# /usr/lib/python3.X/sitecustomize.py symlink).\n");
+    s.push_str("# /usr/lib/python3.X/sitecustomize.py and /usr/bin/awk\n");
+    s.push_str("# alternatives symlinks).\n");
     s.push_str("mkdir -p /tmp/.umlctl-etc-stash 2>/dev/null\n");
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone apt \\\n");
+    s.push_str("         machine-id localtime timezone apt alternatives \\\n");
     s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str(
         "    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n",
@@ -1155,7 +1156,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone apt \\\n");
+    s.push_str("         machine-id localtime timezone apt alternatives \\\n");
     s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str("    [ -e \"/tmp/.umlctl-etc-stash/$f\" ] && \\\n");
     s.push_str("        cp -a \"/tmp/.umlctl-etc-stash/$f\" \"/etc/\" 2>/dev/null\n");
@@ -2323,6 +2324,31 @@ mode = "none"
         assert!(
             s.contains("mount -t tmpfs tmpfs  /tmp"),
             "missing /tmp mount"
+        );
+    }
+
+    /// The private /etc overlay must preserve Debian alternatives targets.
+    /// Otherwise hostfs executables such as /usr/bin/awk become dangling
+    /// symlinks inside the guest after /etc is replaced with tmpfs.
+    #[test]
+    fn render_init_preserves_etc_alternatives() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "minimal"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+"#,
+        )
+        .unwrap();
+        let s = render_init_script(&u).unwrap();
+
+        assert!(
+            s.contains("timezone apt alternatives"),
+            "missing /etc/alternatives from the overlay stash"
         );
     }
 

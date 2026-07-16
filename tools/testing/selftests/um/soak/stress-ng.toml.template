@@ -17,12 +17,19 @@ mode = "none"
 
 [env]
 TMPDIR = "/tmp"
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [[init.phases]]
 name = "smoke"
 cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 0
+
+[[init.phases]]
+name = "prerequisites"
+cmd = "command -v stress-ng >/dev/null && stress-ng --version && echo STRESS_NG_PREREQ_OK"
+expect = "STRESS_NG_PREREQ_OK"
+timeout_secs = 10
 
 # stress-ng kitchen-sink, --verify catches data-corruption (mt-mini analog
 # at scale across ~30 stressors). MM + sched + signal + pipe; explicitly

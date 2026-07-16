@@ -18,6 +18,7 @@ mode = "none"
 [env]
 TMPDIR = "/tmp"
 KBUILD_OUTPUT = "/tmp/build"
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [[init.phases]]
 name = "smoke"
@@ -25,8 +26,16 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 0
 
-# tinyconfig build of UML kernel (host = guest arch). Uses /tmp tmpfs
-# for KBUILD_OUTPUT to avoid hostfs write fan-out. Tests fork-storm
+[[init.phases]]
+name = "prerequisites"
+cmd = "for tool in make awk gcc; do path=$(command -v \"$tool\" || true); echo \"KBUILD_PREREQ tool=$tool path=$path\"; [ -n \"$path\" ] || exit 1; done; echo KBUILD_PREREQ_OK"
+expect = "KBUILD_PREREQ_OK"
+timeout_secs = 10
+
+# 64-bit tinyconfig build of a UML kernel (host = guest arch). Selecting
+# CONFIG_64BIT keeps this workload aligned with the running x86_64 UML kernel
+# and avoids silently requiring an unrelated 32-bit userspace SDK. Uses /tmp
+# tmpfs for KBUILD_OUTPUT to avoid hostfs write fan-out. Tests fork-storm
 # (gcc invocations), pipe (make jobserver), file I/O at high rate.
 #
 # Each command uses `&& echo OK || (echo FAIL; exit 1)` instead of
@@ -35,7 +44,7 @@ timeout_secs = 0
 # false PASS verdicts.
 [[init.phases]]
 name = "tinyconfig"
-cmd = "mkdir -p /tmp/build && cd {{REPO_ROOT}} && make ARCH=um O=/tmp/build tinyconfig >/tmp/tc.log 2>&1 && echo TINYCONFIG_OK || (tail -10 /tmp/tc.log; echo TINYCONFIG_FAIL; exit 1)"
+cmd = "mkdir -p /tmp/build && cd {{REPO_ROOT}} && make ARCH=um O=/tmp/build tinyconfig >/tmp/tc.log 2>&1 && scripts/config --file /tmp/build/.config --enable 64BIT >>/tmp/tc.log 2>&1 && make ARCH=um O=/tmp/build olddefconfig >>/tmp/tc.log 2>&1 && grep -q '^CONFIG_64BIT=y' /tmp/build/.config && echo TINYCONFIG_64BIT_OK || (tail -10 /tmp/tc.log; echo TINYCONFIG_64BIT_FAIL; exit 1)"
 expect = ""
 timeout_secs = 60
 
