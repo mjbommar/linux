@@ -53,7 +53,7 @@ made.
 | soak | bounded mission soak | PENDING | superseded by focused gates for this fix set; retain as an optional CI-duration check |
 | soak | first natural 24-hour KVM-v2 attempt | INVALID / STOPPED | stopped after 31 minutes and 460 rows: memcheck 100/100 PASS, iocheck 100/100 PASS, while stress-ng 0/100, CPython 0/80, and kbuild 0/80 never started their intended workload because hostfs prerequisites were absent or hidden; controlled init exit was also misclassified as PANIC |
 | soak | all-workload KVM-v2 preflight | PASS | corrected harness at `d402dcea1949`; one fresh iteration each of memcheck, iocheck, stress-ng, CPython, and 64-bit tiny kbuild passed 5/5 with `panic=false`; `soak-preflight-kvm-v2-20260715-r7/` |
-| soak | natural 24-hour KVM-v2 soak | PENDING RESTART | starts only from the pushed corrected harness after the five-workload preflight above |
+| soak | natural 24-hour KVM-v2 soak | RUNNING | corrected pushed tree `48a94005bf02`; controller PID 1911797 started 2026-07-16 00:06 UTC for 86,400 seconds with two workers and ten iterations per workload; first complete rotation passed 100/100 (20 each for memcheck, iocheck, stress-ng, CPython, and 64-bit tiny kbuild) with zero panic, timeout, host error, threshold, or thermal events; rotation 1 started; `soak-kvm-v2-24h-48a94005bf02-r8/` |
 
 ## Correctness and publication blockers
 
